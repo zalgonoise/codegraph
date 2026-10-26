@@ -1,0 +1,49 @@
+[
+  {
+    "name": "kafkabus-handle",
+    "transport": "kafka", "role": "consumer", "direction": "inbound",
+    "pkgs": ["example.com/inhouse/kafkabus/v2"], "recv": "*", "funcs": ["Handle"],
+    "keyArgs": [1], "handlerArgs": [2]
+  },
+  {
+    "name": "kafkabus-publish",
+    "transport": "kafka", "role": "producer", "direction": "outbound",
+    "pkgs": ["example.com/inhouse/kafkabus/v2"], "recv": "*", "funcs": ["Publish"],
+    "keyMethods": [{"arg": 2, "method": "Topic"}], "msgArgs": [2]
+  },
+  {
+    "name": "kvcache-key",
+    "transport": "redis", "role": "query", "direction": "outbound",
+    "pkgs": ["example.com/inhouse/kvcache/..."], "recv": "*",
+    "funcs": ["Get", "Set", "SetWithDuration", "SetNX", "Del", "Ttl", "UpsertSet", "IsMember", "Invalidate"],
+    "keyArgs": [2], "skipUnknown": true
+  },
+  {
+    "name": "rabbitbus-mux-handle",
+    "transport": "amqp", "role": "consumer", "direction": "inbound",
+    "pkgs": ["example.com/inhouse/rabbitbus/types"], "recv": "ConsumeMux", "funcs": ["Handle", "HandleFunc"],
+    "keyArgs": [1], "handlerArgs": [2]
+  },
+  {
+    "name": "rabbitbus-new-consumer",
+    "transport": "amqp", "role": "consumer", "direction": "inbound",
+    "pkgs": ["example.com/inhouse/rabbitbus/rabbitmq"], "recv": "", "funcs": ["NewConsumer"],
+    "keyFields": [{"arg": 0, "field": "Queues.PriorityQueue"}], "skipUnknown": true,
+    "handlerFields": [{"arg": 0, "field": "Handler"}], "handlerMethods": ["ProcessMessage"],
+    "fallback": true
+  },
+  {
+    "name": "rabbitbus-broker-consume",
+    "transport": "amqp", "role": "consumer", "direction": "inbound",
+    "pkgs": ["example.com/inhouse/rabbitbus/ports", "example.com/inhouse/rabbitbus/rabbitmq"], "recv": "BrokerRepository|RabbitMQ",
+    "funcs": ["Consume"], "keyArgs": [2], "handlerArgs": [3],
+    "keyDefault": {"funcs": ["New"], "arg": 1, "field": "PriorityQueue"}
+  },
+  {
+    "name": "rabbitbus-publish",
+    "transport": "amqp", "role": "producer", "direction": "outbound",
+    "pkgs": ["example.com/inhouse/rabbitbus/ports", "example.com/inhouse/rabbitbus/rabbitmq"], "recv": "Publisher|BrokerRepository|RabbitMQ",
+    "funcs": ["Publish"], "keyArgs": [2],
+    "keyDefault": {"funcs": ["New"], "arg": 1, "field": "PriorityQueue"}
+  }
+]

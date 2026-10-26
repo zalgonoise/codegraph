@@ -1,0 +1,25 @@
+{
+  "service": "notifier",
+  "repository": "notifier",
+  "language": "python",
+  "commit": "0000000",
+  "description": "Sample: the Python service ledger notifies over gRPC, described by hand.",
+  "workloads": ["notifier"],
+  "settings": ["SMTP_HOST", "DB_HOST"],
+  "endpoints": [
+    {
+      "direction": "inbound", "transport": "grpc", "role": "server",
+      "keys": ["NotifierService"], "contract": "notifier.v1.NotifierService",
+      "handler": "NotifierServicer", "position": "notifier/server.py:21",
+      "methods": {"Notify": ["sql notifications", "http POST http://smtp-relay/send"]}
+    },
+    {
+      "direction": "outbound", "transport": "sql", "role": "query",
+      "keys": ["notifications"], "position": "notifier/models.py:9"
+    },
+    {
+      "direction": "outbound", "transport": "http", "role": "client",
+      "keys": ["POST http://smtp-relay/send"], "position": "notifier/mail.py:33"
+    }
+  ]
+}

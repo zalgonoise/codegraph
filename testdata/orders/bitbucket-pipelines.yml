@@ -1,0 +1,12 @@
+# The orders sample's image, as a CI pipeline builds and pushes it (read by
+# codegraph inventory: the deployment step then knows which repository a
+# container running team-orders comes from).
+pipelines:
+  default:
+    - step:
+        name: image
+        script:
+          - TAG=$(echo $BITBUCKET_BRANCH | tr '[:upper:]' '[:lower:]')
+          - IMAGE=$REGISTRY_URL/team-orders:release-$TAG
+          - docker build -t $IMAGE -f Dockerfile .
+          - docker push $IMAGE

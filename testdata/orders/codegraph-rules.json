@@ -1,0 +1,13 @@
+[
+  {
+    "name": "orders-events-publisher",
+    "transport": "kafka",
+    "role": "producer",
+    "direction": "outbound",
+    "pkgs": ["github.com/zalgonoise/codegraph/testdata/orders/internal/events"],
+    "recv": "Publisher",
+    "funcs": ["Publish"],
+    "keyArgs": [2],
+    "msgArgs": [3]
+  }
+]

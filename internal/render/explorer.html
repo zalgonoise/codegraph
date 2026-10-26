@@ -1,0 +1,981 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System explorer</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0; --hover: #f0f0ec;
+  --accent: #2f5bd3; --focus: #2f5bd3; --chip: #efefeb; --warn: #9a5b00;
+  --t-http: #2563eb; --t-grpc: #7c3aed; --t-kafka: #c2410c; --t-amqp: #be185d; --t-nats: #0f766e;
+  --t-sql: #15803d; --t-redis: #b91c1c; --t-cli: #4d7c0f; --t-go: #0e7490; --t-main: #475569; --t-other: #57534e;
+  --svc-l: 40%; --svc-s: 55%;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141416; --panel: #1c1c1f; --ink: #ececee; --muted: #9b9ba3; --line: #2e2e33; --hover: #26262b;
+    --accent: #8aa8ff; --focus: #8aa8ff; --chip: #2a2a30; --warn: #f0b35a;
+    --t-http: #7aa7ff; --t-grpc: #b69cff; --t-kafka: #ff9a62; --t-amqp: #ff7cb8; --t-nats: #4fd1c5;
+    --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
+    --svc-l: 72%; --svc-s: 60%;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141416; --panel: #1c1c1f; --ink: #ececee; --muted: #9b9ba3; --line: #2e2e33; --hover: #26262b;
+  --accent: #8aa8ff; --focus: #8aa8ff; --chip: #2a2a30; --warn: #f0b35a;
+  --t-http: #7aa7ff; --t-grpc: #b69cff; --t-kafka: #ff9a62; --t-amqp: #ff7cb8; --t-nats: #4fd1c5;
+  --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
+  --svc-l: 72%; --svc-s: 60%;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+header.top {
+  position: sticky; top: 0; z-index: 5; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+header.top h1 { font-size: 15px; margin: 0; font-weight: 650; white-space: nowrap; }
+header.top h1 a { color: inherit; }
+.stats { display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+.search { flex: 1 1 260px; display: flex; min-width: 0; }
+.search input {
+  width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--ink); font: inherit;
+}
+.theme, .menu, .internal-toggle { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+.internal-toggle { font: inherit; font-size: 12.5px; white-space: nowrap; }
+.internal-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.internal-toggle[hidden] { display: none; }
+.menu { display: none; }
+
+.layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); min-height: calc(100% - 53px); }
+aside {
+  border-right: 1px solid var(--line); background: var(--panel); padding: 12px 10px;
+  position: sticky; top: 53px; height: calc(100vh - 53px); overflow: auto;
+}
+aside input {
+  width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); color: var(--ink); font: inherit; margin-bottom: 10px;
+}
+.repo { margin: 10px 0 2px; padding: 0 6px; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.svc-link {
+  display: flex; justify-content: space-between; gap: 8px; width: 100%; text-align: left; border: 0; background: none;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer; color: var(--ink);
+}
+.svc-link:hover { background: var(--hover); text-decoration: none; }
+.svc-link.active { background: var(--chip); font-weight: 600; }
+.svc-link .n { color: var(--muted); font-size: 12px; }
+
+main { padding: 20px 24px 60px; min-width: 0; }
+main h2 { font-size: 20px; margin: 0 0 4px; word-break: break-word; }
+main h3 { font-size: 14px; margin: 26px 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.sub { color: var(--muted); margin-bottom: 12px; word-break: break-word; }
+.crumbs { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.muted { color: var(--muted); }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.chip.warn { color: var(--warn); }
+.badge {
+  display: inline-block; min-width: 44px; text-align: center; padding: 0 6px; border-radius: 5px;
+  font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .03em;
+  color: var(--tc); border: 1px solid var(--tc); line-height: 17px; flex: none;
+}
+.t-http { --tc: var(--t-http); } .t-grpc { --tc: var(--t-grpc); } .t-kafka { --tc: var(--t-kafka); }
+.t-amqp { --tc: var(--t-amqp); } .t-nats { --tc: var(--t-nats); } .t-sql { --tc: var(--t-sql); }
+.t-redis { --tc: var(--t-redis); } .t-cli { --tc: var(--t-cli); } .t-go { --tc: var(--t-go); } .t-main { --tc: var(--t-main); } .t-other { --tc: var(--t-other); }
+.pill {
+  display: inline-block; padding: 0 8px; border-radius: 999px; font-weight: 600; font-size: 12.5px;
+  color: hsl(var(--h) var(--svc-s) var(--svc-l)); border: 1px solid hsl(var(--h) var(--svc-s) var(--svc-l) / .45);
+  background: hsl(var(--h) var(--svc-s) var(--svc-l) / .08); white-space: nowrap; cursor: pointer;
+}
+.pill:hover { text-decoration: none; background: hsl(var(--h) var(--svc-s) var(--svc-l) / .16); }
+
+.list { list-style: none; margin: 0; padding: 0; }
+.row {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 6px 8px; border-radius: 7px;
+  min-width: 0;
+}
+a.row { color: inherit; }
+a.row:hover, .row.click:hover { background: var(--hover); text-decoration: none; cursor: pointer; }
+.row .key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+.row .handler { color: var(--muted); font-size: 12.5px; word-break: break-all; }
+.row .end { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+.toolbar button {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 4px 10px; cursor: pointer;
+}
+.toolbar button:hover { background: var(--hover); }
+.toolbar label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
+
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree ul { margin-left: 14px; padding-left: 12px; border-left: 2px solid hsl(var(--h, 0) var(--svc-s) var(--svc-l) / .35); }
+.tree li > .node { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; padding: 4px 6px; border-radius: 6px; }
+.tree li > .node:hover { background: var(--hover); }
+.tree .tog {
+  width: 18px; height: 18px; border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; flex: none;
+  transition: transform .12s; line-height: 18px;
+}
+.tree .tog[aria-expanded="true"] { transform: rotate(90deg); }
+.tree .spacer { width: 18px; flex: none; }
+.kind { width: 9px; height: 9px; border-radius: 50%; flex: none; border: 2px solid var(--muted); display: inline-block; align-self: center; }
+.kind.sync { background: var(--muted); }
+.kind.async { background: transparent; border-style: dashed; }
+.arrow { color: var(--muted); }
+.tree .open { font-size: 12px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; align-items: center; }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.empty { color: var(--muted); padding: 8px; }
+.note { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+table.plain { border-collapse: collapse; width: 100%; }
+table.plain td { padding: 5px 8px; border-top: 1px solid var(--line); vertical-align: baseline; }
+table.plain tr:first-child td { border-top: 0; }
+table.settings { border-collapse: collapse; width: 100%; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; margin-top: 6px; }
+table.settings td { padding: 2px 8px 2px 0; vertical-align: top; overflow-wrap: anywhere; }
+table.settings td:first-child { white-space: nowrap; color: var(--muted); }
+.workload { padding: 6px 0; border-top: 1px solid var(--line); }
+.workload:first-child { border-top: 0; }
+
+.diagram-panel { margin: 10px 0 4px; }
+.diagram-panel .toolbar { margin: 0 0 8px; }
+.diagram-panel select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px; }
+.diagram {
+  overflow: auto; max-height: 78vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; margin-bottom: 8px;
+}
+.diagram svg { max-width: none; height: auto; display: block; }
+.diagram.fit svg { width: 100%; }
+.diagram pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 8px 0 0; }
+
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  .menu { display: inline-block; }
+  aside { display: none; position: static; height: auto; max-height: 60vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  body.nav-open aside { display: block; }
+  main { padding: 16px; }
+  header.top { position: static; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1><a href="#/">System explorer</a></h1>
+  <div class="stats" id="stats"></div>
+  <div class="search"><input id="q" type="search" placeholder="Search services, journeys, topics, tables, routes… ( / )" aria-label="Search" autocomplete="off"></div>
+  <button class="menu" id="menu" type="button" aria-controls="services" aria-expanded="false">Services</button>
+  <button class="internal-toggle" id="internal" type="button" aria-pressed="false" hidden title="Show the exported functions and methods of libraries' internal packages">Internal API</button>
+  <button class="theme" id="theme" type="button" title="Toggle light and dark" aria-label="Toggle light and dark">◐</button>
+</header>
+<div class="layout">
+  <aside>
+    <input id="filter" type="search" placeholder="Filter services" aria-label="Filter services" autocomplete="off">
+    <nav id="services"></nav>
+  </aside>
+  <main id="main"></main>
+</div>
+<script id="codegraph-data" type="application/json">/*CODEGRAPH_DATA*/{}</script>
+<script id="codegraph-diagrams" type="application/json">/*CODEGRAPH_DIAGRAMS*/{}</script>
+<script id="codegraph-settings" type="application/json">/*CODEGRAPH_SETTINGS*/{}</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("codegraph-data").textContent);
+D.services = D.services || []; D.journeys = D.journeys || []; D.links = D.links || [];
+D.endpoints = D.endpoints || {}; D.next = D.next || {}; D.dangling = D.dangling || {}; D.partial = D.partial || {};
+const J = D.journeys;
+const MAX_DEPTH = 6, MAX_EXPAND = 1500;
+const TRANSPORTS = ["http", "grpc", "kafka", "amqp", "nats", "sql", "redis", "cli", "go", "main"];
+const TNAME = { http: "HTTP", grpc: "gRPC", kafka: "Kafka", amqp: "RabbitMQ", nats: "NATS", sql: "SQL", redis: "Redis", cli: "CLI", go: "Go API", main: "Main" };
+const MESSAGING = new Set(["kafka", "amqp", "nats"]);
+const REASON = { "same-service": "same service", "broker": "broker queue", "other-transport": "answered on the other transport" };
+// reasonChip says why an unmatched endpoint is not an orphan, or flags a
+// topic or queue that nothing analysed answers.
+function reasonChip(svc, id, e) {
+  const r = D.dangling[svc + "|" + id];
+  if (r) return chip(REASON[r] || r);
+  if ((e.keys || []).every(k => k === "*")) return chip("key unresolved");
+  return MESSAGING.has(e.transport) ? chip("no counterpart", "warn") : null;
+}
+
+// ---- indexes ---------------------------------------------------------------
+const svcs = new Map(D.services.map(s => [s.name, s]));
+const ep = (svc, id) => D.endpoints[svc + "|" + id];
+const nextOf = (svc, id) => D.next[svc + "|" + id] || [];
+const reachedFrom = new Map(); // journey -> [{from, endpoint, n}]
+const usedBy = new Map();      // svc|endpoint -> journeys using it as outbound
+const entryOf = new Map();     // svc|endpoint -> journeys starting there
+const callers = new Map();     // svc|inbound endpoint -> [{svc, endpoint, n}]
+const push = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v); };
+J.forEach((j, i) => {
+  push(entryOf, j.service + "|" + j.entrypoint, i);
+  for (const o of j.outbound || []) {
+    push(usedBy, j.service + "|" + o.endpoint, i);
+    for (const n of nextOf(j.service, o.endpoint)) for (const t of n.journeys || []) push(reachedFrom, t, { from: i, endpoint: o.endpoint, n });
+  }
+});
+for (const [k, ns] of Object.entries(D.next)) {
+  const [svc, id] = splitKey(k);
+  for (const n of ns) push(callers, n.to + "|" + n.toEndpoint, { svc, endpoint: id, n });
+}
+const keyIndex = new Map(); // transport + " " + key -> [{svc, id}]
+for (const [k, e] of Object.entries(D.endpoints)) {
+  const [svc, id] = splitKey(k);
+  if (e.transport === "main") continue; // every service's own work: not a shared key
+  for (const key of e.keys || []) push(keyIndex, e.transport + " " + key, { svc, id });
+}
+const linksFrom = new Map(), linksTo = new Map();
+for (const l of D.links) { push(linksFrom, l.from, l); push(linksTo, l.to, l); }
+// A library's internal API (endpoints of role internal) is hidden unless the
+// viewer asks for it; the choice is remembered in this browser.
+const isInternal = i => (ep(J[i].service, J[i].entrypoint) || {}).role === "internal";
+const HAS_INTERNAL = J.some((j, i) => isInternal(i));
+let showInternal = false;
+try { showInternal = localStorage.getItem("codegraph-internal") === "1"; } catch (e) { /* storage unavailable */ }
+const visible = i => showInternal || !isInternal(i);
+const apiCallers = new Map(), apiCalled = new Map(); // library symbol's journey <-> journeys calling it
+for (const [c, a] of D.api || []) { push(apiCallers, a, c); push(apiCalled, c, a); }
+
+function splitKey(k) { const i = k.indexOf("|"); return [k.slice(0, i), k.slice(i + 1)]; }
+
+// ---- DOM helpers -------------------------------------------------------------
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "style") el.setAttribute("style", v);
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+// fill replaces el's children, flattening arrays and skipping null and false.
+function fill(el, ...kids) { el.replaceChildren(...kids.flat(Infinity).filter(c => c != null && c !== false)); }
+const tclass = t => "t-" + (TNAME[t] ? t : "other");
+const badge = t => h("span", { class: "badge " + tclass(t) }, TNAME[t] || t);
+const chip = (text, cls) => h("span", { class: "chip" + (cls ? " " + cls : "") }, text);
+function hue(s) { let x = 0; for (const c of s) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x % 360; }
+const pill = name => h("a", { class: "pill", href: "#/s/" + enc(name), style: "--h:" + hue(repoOf(name)) }, name);
+// pillText is a pill inside a row that is itself a link (anchors cannot nest).
+const pillText = name => h("span", { class: "pill", style: "--h:" + hue(repoOf(name)) }, name);
+const kindDot = k => h("span", { class: "kind " + (k === "async" ? "async" : "sync"), title: k === "async" ? "async" : "sync" });
+const enc = encodeURIComponent;
+function repoOf(name) { const s = svcs.get(name); return s && s.module ? s.module.replace(/\/v\d+$/, "").split("/").pop() : name; }
+const jHref = i => "#/j/" + i;
+const kHref = (t, k) => "#/k/" + enc(t) + "/" + enc(k);
+function keysOf(e) { return (e.keys || []).join(", "); }
+function journeyLabel(i) { const j = J[i]; return j.key; }
+
+// ---- diagrams (on demand) -----------------------------------------------------
+// Diagrams are drawn only when asked: the Mermaid sources of the system and
+// service diagrams are parsed from their inert script on first use, journey
+// and connection diagrams are written from the data above, and Mermaid is
+// fetched from the CDN on the first click, never on load.
+const MERMAID_URL = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+const MAX_SEQ_STEPS = 200;
+let diagramSources = null, mermaidLoad = null, diagramSeq = 0;
+function diagramSource(key) {
+  if (!diagramSources) {
+    try { diagramSources = JSON.parse(document.getElementById("codegraph-diagrams").textContent); } catch (e) { diagramSources = {}; }
+  }
+  return diagramSources[key];
+}
+const hasDiagram = key => diagramSource(key) !== undefined;
+// ---- deployment (codegraph link -deploy) -------------------------------------------------
+const DEP = D.deploy || null;
+let settingsData = null;
+function settingsOf(key) { // a workload's settings, parsed on first use
+  if (!settingsData) {
+    try { settingsData = JSON.parse(document.getElementById("codegraph-settings").textContent); } catch (e) { settingsData = {}; }
+  }
+  return settingsData[key] || {};
+}
+const deployOf = name => DEP && DEP.services ? DEP.services[name] || null : null;
+const deployed = name => { const v = deployOf(name); return !!(v && (v.workloads || []).length); };
+// mockOn is the mock switched on in from that names to: the link may not be taken there.
+const mockOn = (from, to) => DEP ? (DEP.mocked || []).find(m => m.from === from && (m.to || []).includes(to)) : null;
+function workloadRow(name, w) {
+  const what = w.kind === "CronJob" ? "cronjob " + (w.schedule || "") : w.kind.toLowerCase() + (w.replicas != null ? ", " + w.replicas + (w.replicas === 1 ? " replica" : " replicas") : "");
+  const box = h("div", { hidden: true });
+  const settings = settingsOf(name + "|" + w.name);
+  const keys = Object.keys(settings.env || {}).sort(), secrets = settings.secrets || [];
+  const toggle = h("button", { type: "button", onclick: () => {
+    box.hidden = !box.hidden;
+    toggle.textContent = (box.hidden ? "Show" : "Hide") + " settings (" + (keys.length + secrets.length) + ")";
+    if (!box.hidden && !box.children.length) {
+      box.append(h("table", { class: "settings" }, ...keys.map(k => h("tr", {}, h("td", {}, k), h("td", {}, settings.env[k]))),
+        ...secrets.map(k => h("tr", {}, h("td", {}, k), h("td", { class: "muted" }, "(secret, not read)")))));
+    }
+  } }, "Show settings (" + (keys.length + secrets.length) + ")");
+  return h("div", { class: "workload" },
+    h("div", { class: "toolbar" }, h("strong", {}, w.name), chip(what), ...(w.hosts || []).map(x => chip(x)),
+      ...(w.mocks || []).map(m => chip(m + "=true", "warn")), keys.length + secrets.length ? toggle : null),
+    w.command ? h("div", { class: "handler" }, h("code", {}, w.command)) : null, box);
+}
+function pairRows(pairs, note) {
+  return h("ul", { class: "list" }, pairs.map(p => h("li", {}, h("div", { class: "row" }, pill(p.to),
+    (p.keys || []).length ? h("span", { class: "handler" }, p.keys.join(" · ")) : null,
+    (p.settings || []).length ? h("code", {}, p.settings.join(", ")) : null,
+    note ? h("span", { class: "end" }, note(p)) : null))));
+}
+// productionSection says what the deployment runs of a service, and checks its
+// gRPC and HTTP links against the addresses it is configured with.
+function productionSection(name) {
+  const v = deployOf(name);
+  if (!v) return null;
+  const env = DEP.environment;
+  if (!(v.workloads || []).length) return [h("h3", {}, "In " + env),
+    h("div", { class: "card empty" }, "Not deployed in " + env + ": no workload runs this main.")];
+  const a = v.addresses || {};
+  const parts = [];
+  const part = (title, list, render, help) => {
+    if (!(list || []).length) return;
+    parts.push(h("div", { style: "margin-top:10px" }, h("div", { class: "muted" }, title + " (" + list.length + ")"),
+      help ? h("div", { class: "note", style: "margin:0 0 4px" }, help) : null, render(list)));
+  };
+  part("Calls whose address is configured too", a.confirmed, ps => pairRows(ps));
+  part("Calls with no address configured", a.codeOnly, ps => pairRows(ps, () => chip("not configured", "warn")),
+    "The code links to it, but no setting names its Kubernetes Service (a default in the code, or a setting named unlike an address).");
+  part("Addresses configured, no call in the code", a.configOnly, ps => pairRows(ps, p => p.checked && (p.unread || []).length === (p.settings || []).length
+    ? chip("read by nothing in its code") : chip("read by its code, no call found", "warn")));
+  part("Contracts served by several services: the one configured", a.settled, ss => h("ul", { class: "list" }, ss.map(st =>
+    h("li", {}, h("div", { class: "row" }, h("span", { class: "key" }, st.key), h("span", { class: "arrow" }, "→"), pill(st.to),
+      h("code", {}, st.setting), h("span", { class: "end" }, chip("not " + (st.notDialled || []).join(", "))))))));
+  part("Mocks switched on, naming services it calls", a.mocked, ms => h("ul", { class: "list" }, ms.map(m =>
+    h("li", {}, h("div", { class: "row" }, h("code", {}, m.setting + "=true"), h("span", { class: "arrow" }, "→"), ...(m.to || []).map(pill))))));
+  return [h("h3", {}, "In " + env + " (" + v.workloads.length + " workload" + (v.workloads.length > 1 ? "s" : "") + ")"),
+    h("div", { class: "card" }, ...v.workloads.map(w => workloadRow(name, w)), ...parts)];
+}
+// productionSummary is the home page's view of the deployment.
+function productionSummary() {
+  if (!DEP) return null;
+  const names = D.services.map(s => s.name);
+  const idle = names.filter(n => !deployed(n)).sort();
+  const mocks = []; // [service, setting, workloads]
+  for (const n of names) {
+    const by = new Map();
+    for (const w of (deployOf(n) || {}).workloads || []) for (const m of w.mocks || []) push(by, m, w.name);
+    for (const [m, ws] of [...by.entries()].sort()) mocks.push([n, m, ws.length]);
+  }
+  const count = k => names.reduce((t, n) => t + (((deployOf(n) || {}).addresses || {})[k] || []).length, 0);
+  return [h("h3", {}, "In " + DEP.environment),
+    h("div", { class: "card" },
+      h("div", { class: "toolbar" }, chip((names.length - idle.length) + " of " + names.length + " services run there"),
+        chip(count("confirmed") + " calls configured too"), chip(count("codeOnly") + " calls with no address configured", count("codeOnly") ? "warn" : ""),
+        chip(count("configOnly") + " addresses with no call")),
+      idle.length ? [h("div", { class: "muted", style: "margin-top:8px" }, "Not deployed (" + idle.length + ")"),
+        h("div", { class: "toolbar" }, ...idle.map(pill))] : null,
+      mocks.length ? [h("div", { class: "muted", style: "margin-top:8px" }, "Mocks switched on (" + mocks.length + ")"),
+        h("ul", { class: "list" }, mocks.map(([n, m, k]) => h("li", {}, h("div", { class: "row" }, pill(n), h("code", {}, m + "=true"),
+          h("span", { class: "end" }, chip(k + " workload" + (k > 1 ? "s" : "")))))))] : null,
+      h("div", { class: "note" }, "From " + (DEP.source || "the deployment") + ", rendered offline. Each service's page has its workloads, settings and address check."))];
+}
+function loadMermaid() {
+  if (!mermaidLoad) mermaidLoad = import(MERMAID_URL).then(m => m.default).catch(err => { mermaidLoad = null; throw err; });
+  return mermaidLoad;
+}
+function isDark() {
+  const t = document.documentElement.dataset.theme;
+  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+// diagramPanel is a "Show …" button that draws a diagram in place, with
+// controls to redraw it (after changing the options next to it), hide it, copy
+// its Mermaid source or open it alone as SVG.
+function diagramPanel(label, source, ...options) {
+  const panel = h("div", { class: "diagram-panel" });
+  const box = h("div", { class: "diagram", role: "region", "aria-label": label });
+  let src = "", svg = "";
+  const status = h("span", { class: "note", role: "status" });
+  const show = h("button", { type: "button", onclick: () => draw() }, "Show " + label);
+  const hide = h("button", { type: "button", hidden: true, onclick: () => { box.remove(); hide.hidden = copy.hidden = open.hidden = fit.hidden = true; show.textContent = "Show " + label; status.textContent = ""; } }, "Hide");
+  const copy = h("button", { type: "button", hidden: true, onclick: () => navigator.clipboard.writeText(src).then(() => { status.textContent = "Mermaid source copied."; }, () => { status.textContent = "Could not copy."; }) }, "Copy source");
+  const open = h("button", { type: "button", hidden: true, onclick: () => { if (svg) window.open(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })), "_blank"); } }, "Open as SVG");
+  const fit = h("button", { type: "button", hidden: true, "aria-pressed": "false", onclick: () => {
+    const on = box.classList.toggle("fit");
+    fit.setAttribute("aria-pressed", String(on));
+    fit.textContent = on ? "Actual size" : "Fit width";
+  } }, "Fit width");
+  async function draw() {
+    src = source();
+    if (!src) { status.textContent = "Nothing to draw."; return; }
+    panel.append(box);
+    hide.hidden = copy.hidden = false;
+    show.textContent = "Redraw";
+    status.textContent = "Drawing…";
+    box.replaceChildren();
+    svg = "";
+    open.hidden = fit.hidden = true;
+    const fail = msg => { status.textContent = ""; box.replaceChildren(h("div", { class: "empty" }, msg), h("pre", {}, src)); };
+    let mermaid;
+    try { mermaid = await loadMermaid(); } catch (err) {
+      return fail("Could not load Mermaid from cdn.jsdelivr.net (offline?). The source below renders wherever Mermaid does (GitHub, GitLab, mermaid.live).");
+    }
+    const id = "codegraph-diagram-" + (++diagramSeq);
+    try {
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: isDark() ? "dark" : "default",
+        maxTextSize: 400000, maxEdges: 2000, flowchart: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
+      svg = (await mermaid.render(id, src)).svg;
+      box.innerHTML = svg;
+      open.hidden = fit.hidden = false;
+      status.textContent = "";
+    } catch (err) {
+      document.getElementById("d" + id)?.remove(); // what Mermaid leaves behind when it fails
+      fail("Mermaid could not draw it: " + (err && err.message || err));
+    }
+  }
+  panel.append(h("div", { class: "toolbar" }, show, ...options, hide, fit, copy, open, status));
+  return panel;
+}
+
+// Mermaid text escapes, as in system.md's diagrams.
+const seqText = s => String(s || "").replace(/#/g, "#35;").replace(/;/g, "#59;").replace(/\n/g, " ");
+const seqAlias = s => { s = String(s || ""); if (s.length > 48) s = s.slice(0, 47) + "…"; return s.replace(/;/g, ",").replace(/#/g, "").replace(/\n/g, " "); };
+const flowText = s => '"' + String(s || "").replace(/"/g, "#quot;").replace(/\n/g, " ") + '"';
+
+// externalTarget names the lifeline of an endpoint outside the analysed
+// services and the message sent to it: a gRPC service (the method as
+// message), an HTTP host (the route), or a table, topic or subject (the role).
+function externalTarget(e) {
+  const key = keysOf(e);
+  if (e.transport === "grpc" && key.includes("/")) { const i = key.indexOf("/"); return [key.slice(0, i), key.slice(i + 1)]; }
+  if (e.transport === "http") {
+    const m = /^(\S+) \w+:\/\/([^/]*)(\/.*)?$/.exec(key);
+    if (m) return [m[2], m[1] + " " + (m[3] || "/")];
+  }
+  if (key === "*" && e.message) return [e.message, e.role];
+  return [key, e.role];
+}
+
+// sequenceOf writes journey i as a Mermaid sequence diagram, following the
+// services it reaches up to depth services beyond its own, with the stores
+// and external endpoints the page's filters show.
+function sequenceOf(i, depth) {
+  const ids = new Map(), decl = [], body = [];
+  let steps = 0, capped = false;
+  const part = (key, label, actor) => {
+    if (!ids.has(key)) {
+      const id = "p" + ids.size;
+      ids.set(key, id);
+      decl.push("  " + (actor ? "actor" : "participant") + " " + id + " as " + seqAlias(label));
+    }
+    return ids.get(key);
+  };
+  const j = J[i], entry = ep(j.service, j.entrypoint) || {};
+  const caller = part("caller", "caller", true), svc = part("s:" + j.service, j.service);
+  const async = entry.kind === "async";
+  body.push("  " + caller + (async ? "-)" : "->>+") + svc + ": " + seqText(j.transport + " " + j.key));
+  if (j.handler) body.push("  Note over " + svc + ": " + seqText(j.handler));
+  walk(i, new Set([i]), 0);
+  if (!async) body.push("  " + svc + "-->>-" + caller + ": response");
+  if (capped) body.push("  Note over " + svc + ": " + seqText("… more steps: the first " + MAX_SEQ_STEPS + " are drawn; lower the depth, or expand the path above"));
+  return "sequenceDiagram\n" + decl.join("\n") + "\n" + body.join("\n") + "\n";
+
+  function walk(x, path, d) {
+    const jx = J[x], from = part("s:" + jx.service, jx.service), seen = new Set();
+    for (const o of jx.outbound || []) {
+      if (steps >= MAX_SEQ_STEPS) { capped = true; return; }
+      const e = ep(jx.service, o.endpoint);
+      if (!e) continue;
+      const ns = nextOf(jx.service, o.endpoint);
+      if (!ns.length) {
+        const store = e.transport === "sql" || e.transport === "redis";
+        if (store ? !filters.stores : !filters.externals) continue;
+        const [target, msg] = externalTarget(e);
+        const to = part("x:" + e.transport + ":" + target, (TNAME[e.transport] || e.transport).toUpperCase() + " " + target);
+        const line = "  " + from + (o.kind === "async" || o.background ? "-)" : "->>") + to + ": " + seqText(msg + (o.background ? " (goroutine)" : ""));
+        if (!seen.has(line)) { seen.add(line); body.push(line); steps++; }
+        continue;
+      }
+      for (const n of ns) for (const t of (n.journeys && n.journeys.length ? n.journeys : [null])) {
+        const to = part("s:" + n.to, n.to), sync = n.kind !== "async" && !o.background;
+        body.push("  " + from + (sync ? "->>+" : "-)") + to + ": " + seqText(e.transport + " " + n.key + (o.background ? " (goroutine)" : "")));
+        steps++;
+        if (t === null) body.push("  Note over " + to + ": (no journey for this endpoint)");
+        else if (path.has(t)) body.push("  Note over " + to + ": " + seqText(J[t].handler || J[t].key) + " (cycle, already on this path)");
+        else if (d + 1 > depth) body.push("  Note over " + to + ": " + seqText(J[t].handler || J[t].key) + " (not followed: deeper than " + depth + ")");
+        else {
+          if (J[t].handler) body.push("  Note over " + to + ": " + seqText(J[t].handler));
+          const p = new Set(path); p.add(t);
+          walk(t, p, d + 1);
+        }
+        if (sync) body.push("  " + to + "-->>-" + from + ": response");
+      }
+    }
+  }
+}
+
+// connectionsOf writes a service's neighbourhood as a flowchart: the services
+// linking into it on the left, those it links to on the right, one edge per
+// transport (dashed when async, dotted when a store is shared).
+function connectionsOf(name) {
+  const lines = ["flowchart LR", "  classDef self stroke-width:3px", "  s0[" + flowText(name) + "]:::self"];
+  const ids = new Map([[name, "s0"]]);
+  const node = other => { if (!ids.has(other)) { ids.set(other, "s" + ids.size); lines.push("  " + ids.get(other) + "[" + flowText(other) + "]"); } return ids.get(other); };
+  const edges = new Map();
+  const add = (l, from, to) => {
+    const shared = l.kind === "shared-store", k = from + "|" + to + "|" + l.transport + "|" + (shared ? "shared" : l.kind);
+    if (!edges.has(k)) edges.set(k, { from, to, l, n: 0 });
+    edges.get(k).n++;
+  };
+  for (const l of linksTo.get(name) || []) if (l.from !== name) add(l, l.from, name);
+  for (const l of linksFrom.get(name) || []) if (l.to !== name) add(l, name, l.to);
+  for (const { from, to, l, n } of edges.values()) {
+    const shared = l.kind === "shared-store";
+    const label = flowText((shared ? "shared " : "") + (TNAME[l.transport] || l.transport) + (n > 1 ? " ×" + n : ""));
+    const arrow = shared ? "<-.->" : l.kind === "async" ? "-.->" : "-->";
+    lines.push("  " + node(from) + " " + arrow + "|" + label + "| " + node(to));
+  }
+  if (!edges.size) return "";
+  return lines.join("\n") + "\n";
+}
+
+// ---- header, sidebar ----------------------------------------------------------
+function renderStats() {
+  const repos = new Set(D.services.map(s => s.module || s.name));
+  const shared = D.links.filter(l => l.kind === "shared-store").length;
+  const el = document.getElementById("stats");
+  el.replaceChildren(chip(D.services.length + " services"), chip(repos.size + " repositories"),
+    chip(J.length + " journeys"), chip(D.links.length - shared + " links"), shared ? chip(shared + " shared stores") : "");
+}
+function renderSidebar(active) {
+  const f = document.getElementById("filter").value.trim().toLowerCase();
+  const groups = new Map();
+  for (const s of D.services) {
+    if (f && !s.name.toLowerCase().includes(f) && !(s.module || "").toLowerCase().includes(f)) continue;
+    push(groups, repoOf(s.name), s);
+  }
+  const nav = document.getElementById("services");
+  const out = [];
+  for (const repo of [...groups.keys()].sort()) {
+    const list = groups.get(repo);
+    if (list.length > 1 || list[0].name !== repo) out.push(h("div", { class: "repo" }, repo));
+    for (const s of list) {
+      out.push(h("a", { class: "svc-link" + (s.name === active ? " active" : ""), href: "#/s/" + enc(s.name) },
+        h("span", {}, s.name), h("span", { class: "n" }, (s.journeys || []).filter(visible).length || "")));
+    }
+  }
+  if (!out.length) out.push(h("div", { class: "empty" }, "No service matches."));
+  nav.replaceChildren(...out);
+}
+
+// ---- home ------------------------------------------------------------------------
+function reach(i) { // distinct services a journey reaches, across services
+  const seen = new Set([J[i].service]), visited = new Set([i]), queue = [[i, 0]];
+  while (queue.length) {
+    const [x, d] = queue.shift();
+    if (d >= MAX_DEPTH) continue;
+    for (const o of J[x].outbound || []) for (const n of nextOf(J[x].service, o.endpoint)) {
+      seen.add(n.to);
+      for (const t of n.journeys || []) if (!visited.has(t)) { visited.add(t); queue.push([t, d + 1]); }
+    }
+  }
+  return seen.size - 1;
+}
+let reachCache = null;
+function renderHome(main) {
+  if (!reachCache) reachCache = J.map((_, i) => reach(i));
+  const byT = {};
+  for (const l of D.links) { const t = l.kind === "shared-store" ? "shared " + l.transport : l.transport; byT[t] = (byT[t] || 0) + 1; }
+  const top = J.map((j, i) => [i, reachCache[i]]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1] || J[a[0]].service.localeCompare(J[b[0]].service)).slice(0, 15);
+  const topics = [...keyIndex.entries()].filter(([k]) => /^(kafka|amqp|nats) /.test(k))
+    .map(([k, v]) => [k, new Set(v.map(x => x.svc)).size]).filter(x => x[1] > 1).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  const orphans = [], seenOrphan = new Set();
+  for (const [k, r] of Object.entries(D.dangling)) {
+    const [svc, id] = splitKey(k), e = D.endpoints[k];
+    const sig = svc + "|" + (e && e.transport) + "|" + (e && e.role) + "|" + (e && keysOf(e));
+    if (r || !e || !MESSAGING.has(e.transport) || (e.keys || []).every(x => x === "*") || seenOrphan.has(sig)) continue;
+    seenOrphan.add(sig);
+    orphans.push({ svc, e });
+  }
+  for (const [k, groups] of Object.entries(D.partial)) { // the unlinked keys of partly linked endpoints
+    const [svc] = splitKey(k), e = D.endpoints[k];
+    for (const g of groups) {
+      if (g.reason || !e || !MESSAGING.has(e.transport)) continue;
+      const sig = svc + "|" + e.transport + "|" + e.role + "|" + g.keys.join(", ");
+      if (seenOrphan.has(sig)) continue;
+      seenOrphan.add(sig);
+      orphans.push({ svc, e: { ...e, keys: g.keys } });
+    }
+  }
+  orphans.sort((a, b) => keysOf(a.e).localeCompare(keysOf(b.e)) || a.svc.localeCompare(b.svc));
+  fill(main, 
+    h("h2", {}, "System"),
+    h("div", { class: "sub" }, "Pick a service to see the journeys it offers, or search for a journey, topic, queue, table or route."),
+    diagramPanel("system diagram", () => diagramSource("system")),
+    h("div", { class: "legend" },
+      h("span", {}, kindDot("sync"), "sync call"), h("span", {}, kindDot("async"), "async message"),
+      ...TRANSPORTS.map(t => h("span", {}, badge(t)))),
+    h("h3", {}, "Services and their journeys"),
+    h("div", { class: "grid3" }, directory()),
+    productionSummary(),
+    h("h3", {}, "Links by transport"),
+    h("div", { class: "card" }, h("div", { class: "toolbar" }, ...Object.entries(byT).sort().map(([t, n]) => chip(t + " · " + n)))),
+    h("div", { class: "grid2" },
+      h("div", {}, h("h3", {}, "Journeys with the widest reach"),
+        h("div", { class: "note", style: "margin:-4px 0 8px" }, "Other services each journey reaches, up to " + MAX_DEPTH + " hops away."),
+        h("div", { class: "card" }, h("ul", { class: "list" }, top.map(([i, n]) => h("li", {}, journeyRow(i, chip(n + " services"))))))),
+      h("div", {}, h("h3", {}, "Topics and queues shared by the most services"),
+        h("div", { class: "card" }, h("ul", { class: "list" }, topics.map(([k, n]) => {
+          const t = k.slice(0, k.indexOf(" ")), key = k.slice(k.indexOf(" ") + 1);
+          return h("li", {}, h("a", { class: "row", href: kHref(t, key) }, badge(t), h("span", { class: "key" }, key), h("span", { class: "end" }, chip(n + " services"))));
+        }))))),
+    orphans.length ? [h("h3", {}, "Topics and queues nothing analysed answers (" + orphans.length + ")"),
+      h("div", { class: "note", style: "margin:-4px 0 8px" }, "Their producer or consumer may live in a repository that was not analysed, or they may be unused. Retry, delay and dead-letter queues, a service's own topics and names answered on the other transport are left out."),
+      h("div", { class: "card" }, h("ul", { class: "list" }, orphans.map(o => h("li", {},
+        h("a", { class: "row", href: kHref(o.e.transport, (o.e.keys || [])[0] || "") }, badge(o.e.transport), h("span", { class: "muted" }, o.e.role),
+          h("span", { class: "key" }, keysOf(o.e)), h("span", { class: "end" }, pillText(o.svc)))))))] : null);
+}
+// directory lists every repository's services with the journeys each offers,
+// per transport: the starting point to visit a service and pick a journey.
+function directory() {
+  const repos = new Map();
+  for (const s of D.services) push(repos, repoOf(s.name), s);
+  return [...repos.keys()].sort().map(repo => h("div", { class: "card" },
+    h("div", { class: "repo", style: "margin:0 0 6px;padding:0" }, repo),
+    h("ul", { class: "list" }, repos.get(repo).map(s => {
+      const byT = {};
+      for (const i of s.journeys || []) if (J[i].transport !== "main" && visible(i)) byT[J[i].transport] = (byT[J[i].transport] || 0) + 1;
+      return h("li", {}, h("a", { class: "row", href: "#/s/" + enc(s.name) }, pillText(s.name),
+        h("span", { class: "end" }, s.declared ? chip("declared", "warn") : null, s.library ? chip("library") : null, DEP && !deployed(s.name) && !s.library ? chip("not deployed") : null, Object.keys(byT).length ? Object.entries(byT).sort().map(([t, n]) => chip(n + " " + (TNAME[t] || t))) : chip("no inbound journeys"))));
+    }))));
+}
+// declaredNote says that a service was described by hand, and where, or that
+// it is a library.
+function declaredNote(s) {
+  const d = s.declared;
+  if (s.library) return "A library (" + (s.module || "") + "), analysed through its exported API: each journey is an exported function or method of its packages (those of its internal packages behind “Internal API”, at the top). Libraries are never linked.";
+  if (!d) return null;
+  return ["Declared by hand, not analysed: " + (d.description || "") + " ",
+    h("span", { class: "handler" }, "(" + [d.language, d.repository + (d.commit ? " at " + d.commit : ""), d.file].filter(Boolean).join(", ") + ")")];
+}
+function journeyRow(i, ...extra) {
+  const j = J[i];
+  return h("a", { class: "row", href: jHref(i) }, badge(j.transport), h("span", { class: "key" }, j.key),
+    pillText(j.service),
+    h("span", { class: "end" }, ...extra));
+}
+
+// ---- service ----------------------------------------------------------------------
+function renderService(main, name) {
+  const s = svcs.get(name);
+  if (!s) return renderMissing(main, "No service named " + name + ".");
+  const all = s.journeys || [], ids = all.filter(visible);
+  const hidden = all.length - ids.length;
+  const groupLinks = (links, side) => {
+    const by = new Map();
+    for (const l of links) push(by, l[side], l);
+    return [...by.keys()].sort().map(other => {
+      const ls = by.get(other);
+      return h("li", {}, h("div", { class: "row" }, pill(other),
+        ...[...new Set(ls.map(l => l.kind === "shared-store" ? "shared " + l.transport : l.transport))].map(t => chip(t)),
+        h("span", { class: "handler" }, ls.map(l => l.key).slice(0, 4).join(" · ") + (ls.length > 4 ? " · …" : ""))));
+    });
+  };
+  const up = linksTo.get(name) || [], down = linksFrom.get(name) || [];
+  const byT = new Map();
+  for (const i of ids) push(byT, J[i].transport, i);
+  // whole endpoints nothing answers, then the unlinked keys of partly linked ones (one row per reason)
+  const unlinked = [
+    ...Object.keys(D.dangling).filter(k => k.startsWith(name + "|")).map(k => ({ k, e: D.endpoints[k] })),
+    ...Object.entries(D.partial).filter(([k]) => k.startsWith(name + "|"))
+      .flatMap(([k, gs]) => gs.map(g => ({ k, e: D.endpoints[k] && { ...D.endpoints[k], keys: g.keys }, partial: g }))),
+  ].filter(u => u.e).sort((a, b) => a.e.transport.localeCompare(b.e.transport) || keysOf(a.e).localeCompare(keysOf(b.e)));
+  fill(main, 
+    h("div", { class: "crumbs" }, h("a", { href: "#/" }, "System"), " › ", repoOf(name)),
+    h("h2", {}, name), h("div", { class: "sub" }, declaredNote(s) || s.module || ""),
+    DEP && !s.library ? h("div", { class: "toolbar" }, deployed(name) ? chip("runs in " + DEP.environment) : chip("not deployed in " + DEP.environment, "warn")) : null,
+    diagramPanel("connections", () => connectionsOf(name)),
+    diagramPanel("service diagram", () => diagramSource((showInternal && hasDiagram("service+internal:" + name) ? "service+internal:" : "service:") + name)),
+    s.library ? libraryCallers(ids) : h("div", { class: "grid2" },
+      h("div", {}, h("h3", {}, "Upstream (" + new Set(up.map(l => l.from)).size + ")"),
+        h("div", { class: "card" }, up.length ? h("ul", { class: "list" }, groupLinks(up, "from")) : h("div", { class: "empty" }, "Nothing analysed calls or sends to it."))),
+      h("div", {}, h("h3", {}, "Downstream (" + new Set(down.map(l => l.to)).size + ")"),
+        h("div", { class: "card" }, down.length ? h("ul", { class: "list" }, groupLinks(down, "to")) : h("div", { class: "empty" }, "It reaches no analysed service.")))),
+    h("h3", {}, "Journeys (" + ids.length + ")"),
+    hidden ? h("div", { class: "note" }, hidden + " journeys of its internal API are hidden: “Internal API”, at the top, shows them.") : null,
+    ids.length ? h("div", { class: "card" }, [...byT.keys()].sort().map(t => h("ul", { class: "list" }, byT.get(t).map(i => {
+      const j = J[i];
+      const crossing = (j.outbound || []).filter(o => nextOf(name, o.endpoint).length).length;
+      return h("li", {}, h("a", { class: "row", href: jHref(i) }, badge(j.transport), h("span", { class: "key" }, j.key),
+        h("span", { class: "handler" }, j.handler || ""),
+        h("span", { class: "end" }, crossing ? chip(crossing + " → services") : null, chip((j.outbound || []).length + " outbound"), chip(j.funcs + " funcs"))));
+    })))) : h("div", { class: "card empty" }, "No inbound endpoints (a job or a library-like main)."),
+    productionSection(name),
+    s.library ? null : [h("h3", {}, "Endpoints without a counterpart (" + unlinked.length + ")"),
+    h("div", { class: "card" }, unlinked.length ? h("ul", { class: "list" }, unlinked.map(({ k, e, partial }) => h("li", {},
+      h("a", { class: "row", href: kHref(e.transport, (e.keys || [])[0] || "") }, badge(e.transport), h("span", { class: "muted" }, e.role),
+        h("span", { class: "key" }, keysOf(e)), h("span", { class: "end" }, partial
+          ? [partial.reason ? chip(REASON[partial.reason] || partial.reason) : chip("no counterpart", "warn"), chip("its other keys link")]
+          : reasonChip(name, splitKey(k)[1], e)))))) :
+      h("div", { class: "empty" }, "Every client, producer and consumer links to an analysed service.")),
+    h("div", { class: "note" }, "Stores (SQL, Redis) and external APIs appear inside each journey.")]);
+}
+// libraryCallers lists the journeys of the run calling a library's exported
+// symbols (ids: its journeys), each with the symbols it calls.
+function libraryCallers(ids) {
+  const by = new Map();
+  for (const a of ids) for (const c of apiCallers.get(a) || []) push(by, c, J[a].key);
+  const rows = [...by.keys()].sort((a, b) => J[a].service.localeCompare(J[b].service) || J[a].key.localeCompare(J[b].key));
+  return [h("h3", {}, "Called by (" + rows.length + " journeys)"),
+    h("div", { class: "card" }, rows.length ? h("ul", { class: "list" }, rows.map(c => h("li", {}, journeyRow(c, ...by.get(c).map(k => chip(k)))))) :
+      h("div", { class: "empty" }, "No journey of the run calls its API (calls outside journeys, such as main's, are in `codegraph query uses`)."))];
+}
+
+// ---- journey -----------------------------------------------------------------------
+const filters = { stores: true, externals: true };
+function renderJourney(main, i) {
+  const j = J[i];
+  if (!j) return renderMissing(main, "No such journey.");
+  const entry = ep(j.service, j.entrypoint) || {};
+  const from = reachedFrom.get(i) || [];
+  const tree = h("ul", { class: "tree" });
+  const root = h("li", {}, h("div", { class: "node" }, h("span", { class: "spacer" }), kindDot(entry.kind), badge(j.transport),
+    h("span", { class: "muted" }, entry.role || ""), h("span", { class: "key" }, j.key), pill(j.service)));
+  const kids = h("ul", { style: "--h:" + hue(repoOf(j.service)) });
+  root.append(kids);
+  tree.append(root);
+  const path = new Set([i]);
+  const draw = () => kids.replaceChildren(...outboundNodes(i, path, 1));
+  draw();
+  const capNote = h("div", { class: "note", role: "status" });
+  const toggle = (label, key) => h("label", {}, h("input", { type: "checkbox", checked: filters[key], onchange: e => { filters[key] = e.target.checked; draw(); } }), label);
+  fill(main, 
+    h("div", { class: "crumbs" }, h("a", { href: "#/" }, "System"), " › ", h("a", { href: "#/s/" + enc(j.service) }, j.service)),
+    h("h2", {}, h("span", { class: "mono", style: "font-size:inherit" }, j.key)),
+    h("div", { class: "sub" }, j.handler ? ["handled by ", h("code", {}, j.handler)] : "", entry.message ? [" · message ", h("code", {}, entry.message)] : ""),
+    h("div", { class: "toolbar" }, isInternal(i) ? chip("internal API", "warn") : null, svcs.get(j.service).declared ? chip("declared by hand", "warn") : chip(j.funcs + " module functions"), chip((j.outbound || []).length + " outbound"),
+      j.async ? chip(j.async + " goroutines") : null, j.truncated ? chip("walk truncated", "warn") : null),
+    from.length ? [h("h3", {}, "Reached from (" + from.length + ")"), h("div", { class: "card" }, h("ul", { class: "list" },
+      from.map(r => h("li", {}, journeyRow(r.from, kindDot(r.n.kind), chip(r.n.kind), r.n.confidence !== "exact" ? chip(r.n.confidence, "warn") : null)))))] : null,
+    (apiCallers.get(i) || []).length ? [h("h3", {}, "Called by (" + apiCallers.get(i).length + ")"), h("div", { class: "card" }, h("ul", { class: "list" },
+      apiCallers.get(i).map(c => h("li", {}, journeyRow(c)))))] : null,
+    (apiCalled.get(i) || []).length ? [h("h3", {}, "Library API it calls (" + apiCalled.get(i).length + ")"), h("div", { class: "card" }, h("ul", { class: "list" },
+      apiCalled.get(i).map(c => h("li", {}, journeyRow(c)))))] : null,
+    h("h3", {}, "Path"),
+    h("div", { class: "toolbar" },
+      h("button", { type: "button", onclick: () => expandAll(tree, capNote) }, "Expand all"),
+      h("button", { type: "button", onclick: () => { collapseAll(tree); capNote.textContent = ""; } }, "Collapse"),
+      toggle("stores", "stores"), toggle("other unlinked endpoints", "externals"),
+      h("span", { class: "legend" }, h("span", {}, kindDot("sync"), "sync"), h("span", {}, kindDot("async"), "async"))),
+    capNote, h("div", { class: "card" }, tree),
+    h("h3", {}, "Diagram"),
+    (() => {
+      const depth = h("select", { "aria-label": "Services to follow" }, [0, 1, 2, 3, 4, 5, 6].map(d => h("option", { value: d, selected: d === 2 }, d)));
+      return diagramPanel("sequence diagram", () => sequenceOf(i, +depth.value), h("label", { class: "muted" }, "services beyond its own ", depth));
+    })(),
+    h("div", { class: "note" }, "The diagram follows the stores and unlinked-endpoint filters above; Redraw after changing them."),
+    j.components && j.components.length ? [h("h3", {}, "Components (" + j.components.length + ")"),
+      h("div", { class: "card" }, h("div", { class: "toolbar" }, j.components.map(c => chip(c))))] : null);
+}
+
+function outboundNodes(i, path, depth) {
+  const j = J[i], out = [];
+  for (const o of j.outbound || []) {
+    const e = ep(j.service, o.endpoint);
+    if (!e) continue;
+    const ns = nextOf(j.service, o.endpoint);
+    const store = e.transport === "sql" || e.transport === "redis";
+    if (!ns.length) {
+      if (store ? !filters.stores : !filters.externals) continue;
+      out.push(h("li", {}, h("div", { class: "node" }, h("span", { class: "spacer" }), kindDot(o.kind), badge(e.transport),
+        h("span", { class: "muted" }, e.role), h("a", { class: "key", href: kHref(e.transport, (e.keys || [])[0] || "") }, keysOf(e)),
+        store ? null : h("span", { class: "muted" }, unlinkedNote(j.service, o.endpoint, e)), o.background ? chip("background") : null)));
+      continue;
+    }
+    for (const n of ns) {
+      if (!(n.journeys || []).length) {
+        out.push(h("li", {}, h("div", { class: "node" }, h("span", { class: "spacer" }), kindDot(n.kind), badge(e.transport),
+          h("span", { class: "key" }, n.key), h("span", { class: "arrow" }, "→"), pill(n.to),
+          h("span", { class: "muted" }, "(no journey for this endpoint)"), confChip(n), o.background ? chip("background") : null)));
+        continue;
+      }
+      for (const t of n.journeys) out.push(stepNode(e, o, n, t, path, depth, j.service));
+    }
+  }
+  if (!out.length && depth === 1) out.push(h("li", { class: "empty" }, "No outbound endpoints" + (filters.stores && filters.externals ? "." : " with these filters.")));
+  return out;
+}
+function unlinkedNote(svc, id, e) {
+  const r = D.dangling[svc + "|" + id];
+  if (r === "same-service") return "(consumed by the service itself)";
+  if (r === "broker") return "(a broker queue)";
+  if (r === "other-transport") return "(consumed on the other messaging transport)";
+  if (e.role === "producer") return "(no consumer among the analysed services)";
+  if (e.role === "client") return "(outside the analysed services)";
+  return "";
+}
+function confChip(n) { return n.confidence && n.confidence !== "exact" ? chip(n.confidence, "warn") : null; }
+function stepNode(e, o, n, t, path, depth, from) {
+  const tj = J[t];
+  const cycle = path.has(t);
+  const li = h("li", {});
+  const kids = h("ul", { style: "--h:" + hue(repoOf(tj.service)) });
+  let open = false, built = false;
+  const tog = cycle ? h("span", { class: "spacer" }) : h("button", { type: "button", class: "tog", "aria-expanded": "false", "aria-label": "Expand", onclick: () => setOpen(!open) }, "▸");
+  function setOpen(v) {
+    open = li._isOpen = v;
+    tog.setAttribute("aria-expanded", String(v));
+    if (v && !built) {
+      built = true;
+      const p = new Set(path); p.add(t);
+      kids.replaceChildren(...outboundNodes(t, p, depth + 1));
+      if (!kids.children.length) kids.append(h("li", { class: "empty" }, "No further outbound endpoints."));
+    }
+    kids.hidden = !v;
+  }
+  if (!cycle) li._open = setOpen;
+  kids.hidden = true;
+  li.append(h("div", { class: "node" }, tog, kindDot(n.kind), badge(e.transport),
+    h("span", { class: "key" }, n.key), h("span", { class: "arrow" }, "→"), pill(tj.service),
+    tj.key !== n.key ? h("span", { class: "key" }, tj.key) : null,
+    tj.handler ? h("span", { class: "handler" }, tj.handler) : null,
+    h("a", { class: "open", href: jHref(t), title: "Open this journey" }, "open"),
+    confChip(n), o.background ? chip("background") : null, cycle ? chip("↻ already on this path", "warn") : null,
+    mockOn(from, tj.service) ? chip("mocked in " + DEP.environment + ": " + mockOn(from, tj.service).setting, "warn") : null), kids);
+  return li;
+}
+function expandAll(tree, note) {
+  // Breadth-first: each pass opens the nodes the previous pass created, up to
+  // MAX_DEPTH services deep and MAX_EXPAND nodes in all.
+  let count = 0, capped = false;
+  for (let pass = 0; pass < MAX_DEPTH; pass++) {
+    const closed = [...tree.querySelectorAll("li")].filter(li => li._open && !li._isOpen);
+    if (!closed.length) break;
+    for (const li of closed) {
+      if (count >= MAX_EXPAND) { capped = true; break; }
+      count++;
+      li._open(true);
+    }
+    if (capped) break;
+  }
+  const left = [...tree.querySelectorAll("li")].some(li => li._open && !li._isOpen);
+  note.textContent = capped ? "Opened the first " + MAX_EXPAND + " steps; open deeper branches by hand."
+    : left ? "Opened " + MAX_DEPTH + " services deep; open deeper branches by hand." : "";
+}
+function collapseAll(tree) { tree.querySelectorAll("li").forEach(li => li._open && li._open(false)); }
+
+// ---- topic / table / route -----------------------------------------------------------
+function renderKey(main, t, key) {
+  const eps = keyIndex.get(t + " " + key) || [];
+  const side = inbound => eps.filter(x => !!ep(x.svc, x.id).inbound === inbound);
+  const row = x => {
+    const e = ep(x.svc, x.id);
+    const js = (e.inbound ? entryOf : usedBy).get(x.svc + "|" + x.id) || [];
+    return h("li", {}, h("div", { class: "row" }, pill(x.svc), h("span", { class: "muted" }, e.role),
+      e.handler ? h("span", { class: "handler" }, e.handler) : null, e.position ? h("span", { class: "handler" }, e.position) : null),
+      js.length ? h("ul", { class: "list", style: "margin-left:18px" }, js.map(i => h("li", {}, journeyRow(i)))) : null);
+  };
+  const ins = side(true), outs = side(false);
+  const linked = new Map();
+  for (const x of ins) for (const c of callers.get(x.svc + "|" + x.id) || []) push(linked, c.svc, c);
+  const isStore = t === "sql" || t === "redis";
+  fill(main, 
+    h("div", { class: "crumbs" }, h("a", { href: "#/" }, "System"), " › ", TNAME[t] || t),
+    h("h2", {}, badge(t), " ", h("span", { class: "mono", style: "font-size:inherit" }, key)),
+    !eps.length ? h("div", { class: "card empty" }, "No endpoint has this key.") : null,
+    isStore ? [h("h3", {}, "Used by (" + outs.length + ")"), h("div", { class: "card" }, h("ul", { class: "list" }, outs.map(row)))] : [
+      h("h3", {}, (t === "kafka" || t === "amqp" || t === "nats" ? "Producers" : "Clients") + " (" + outs.length + ")"),
+      h("div", { class: "card" }, outs.length ? h("ul", { class: "list" }, outs.map(row)) : h("div", { class: "empty" }, "None among the analysed services with this exact key.")),
+      h("h3", {}, (t === "kafka" || t === "amqp" || t === "nats" ? "Consumers" : "Servers") + " (" + ins.length + ")"),
+      h("div", { class: "card" }, ins.length ? h("ul", { class: "list" }, ins.map(row)) : h("div", { class: "empty" }, "None among the analysed services with this exact key.")),
+      linked.size ? [h("h3", {}, "Linked callers (" + linked.size + ")"), h("div", { class: "card" }, h("ul", { class: "list" },
+        [...linked.keys()].sort().map(s => h("li", {}, h("div", { class: "row" }, pill(s), ...linked.get(s).map(c => [h("span", { class: "key" }, keysOf(ep(c.svc, c.endpoint))), confChip(c.n)]))))))] : null]);
+}
+
+// ---- search ---------------------------------------------------------------------------
+function renderSearch(main, q) {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = s => words.every(w => s.toLowerCase().includes(w));
+  const services = D.services.filter(s => hit(s.name + " " + (s.module || ""))).slice(0, 20);
+  const journeys = J.map((j, i) => i).filter(i => visible(i) && hit(J[i].service + " " + J[i].key + " " + (J[i].handler || ""))).slice(0, 40);
+  const keys = [...keyIndex.keys()].filter(hit).sort().slice(0, 60);
+  const section = (title, items) => items.length ? [h("h3", {}, title + " (" + items.length + ")"), h("div", { class: "card" }, h("ul", { class: "list" }, items))] : [];
+  fill(main, h("h2", {}, "Search: ", h("span", { class: "mono", style: "font-size:inherit" }, q)),
+    ...section("Services", services.map(s => h("li", {}, h("a", { class: "row", href: "#/s/" + enc(s.name) }, pillText(s.name), h("span", { class: "handler" }, s.module || ""))))),
+    ...section("Journeys", journeys.map(i => h("li", {}, journeyRow(i, h("span", { class: "handler" }, J[i].handler || ""))))),
+    ...section("Topics, queues, tables and routes", keys.map(k => {
+      const t = k.slice(0, k.indexOf(" ")), key = k.slice(k.indexOf(" ") + 1);
+      const owners = new Set(keyIndex.get(k).map(x => x.svc));
+      return h("li", {}, h("a", { class: "row", href: kHref(t, key) }, badge(t), h("span", { class: "key" }, key), h("span", { class: "end" }, chip(owners.size + (owners.size === 1 ? " service" : " services")))));
+    })),
+    !services.length && !journeys.length && !keys.length ? h("div", { class: "card empty" }, "Nothing matches.") : null);
+}
+function renderMissing(main, msg) { fill(main, h("h2", {}, "Not found"), h("div", { class: "sub" }, msg), h("a", { href: "#/" }, "Back to the system")); }
+
+// ---- routing ------------------------------------------------------------------------------
+// A journey is #/j/<index>, or #/j/<service>/<transport>/<key> (the links in codegraph query's answers).
+function journeyOf(parts) {
+  if (parts.length < 4) return +parts[1];
+  const key = parts.slice(3).join("/");
+  return J.findIndex(j => j.service === parts[1] && j.transport === parts[2] && j.key === key);
+}
+function route() {
+  const main = document.getElementById("main");
+  const q = document.getElementById("q").value.trim();
+  const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  let active = null;
+  if (q) renderSearch(main, q);
+  else if (parts[0] === "s" && parts[1]) { active = parts[1]; renderService(main, parts[1]); }
+  else if (parts[0] === "j" && parts[1] !== undefined) { const i = journeyOf(parts); active = (J[i] || {}).service; renderJourney(main, i); }
+  else if (parts[0] === "k" && parts[1]) renderKey(main, parts[1], parts.slice(2).join("/"));
+  else renderHome(main);
+  renderSidebar(active);
+  if (!q) window.scrollTo(0, 0);
+}
+let timer;
+document.getElementById("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(route, 120); });
+document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Escape") { e.target.value = ""; e.target.blur(); route(); } });
+document.getElementById("filter").addEventListener("input", () => renderSidebar((parseHashService())));
+function parseHashService() { const p = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent); return p[0] === "s" ? p[1] : p[0] === "j" ? (J[journeyOf(p)] || {}).service : null; }
+window.addEventListener("hashchange", () => {
+  const qi = document.getElementById("q");
+  if (qi.value) { qi.value = ""; qi.blur(); }
+  setNav(false);
+  route();
+});
+const menuBtn = document.getElementById("menu");
+function setNav(open) { document.body.classList.toggle("nav-open", open); menuBtn.setAttribute("aria-expanded", String(open)); }
+menuBtn.addEventListener("click", () => setNav(!document.body.classList.contains("nav-open")));
+document.addEventListener("keydown", e => {
+  if (e.key === "/" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) { e.preventDefault(); document.getElementById("q").focus(); }
+});
+const themeBtn = document.getElementById("theme");
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
+try { applyTheme(localStorage.getItem("codegraph-theme")); } catch (e) { /* storage unavailable */ }
+themeBtn.addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark";
+  applyTheme(t);
+  try { localStorage.setItem("codegraph-theme", t); } catch (e) { /* storage unavailable */ }
+});
+const internalBtn = document.getElementById("internal");
+function setInternal(v) {
+  showInternal = v;
+  internalBtn.setAttribute("aria-pressed", String(v));
+  try { localStorage.setItem("codegraph-internal", v ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+}
+if (HAS_INTERNAL) {
+  internalBtn.hidden = false;
+  internalBtn.setAttribute("aria-pressed", String(showInternal));
+  internalBtn.addEventListener("click", () => { setInternal(!showInternal); route(); });
+}
+renderStats();
+route();
+</script>
+</body>
+</html>
