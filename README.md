@@ -85,7 +85,9 @@ make test     # gofmt, go vet, the unit tests and the golden test over the bundl
 make cover    # the same tests' statement coverage (fails under COVER_MIN, 70%)
 ```
 
-`go install github.com/zalgonoise/codegraph/cmd/codegraph@latest` installs the binary alone. The rest of this guide runs
+`go install github.com/zalgonoise/codegraph/cmd/codegraph@latest` installs the binary alone, and the GitHub releases
+have binaries for macOS and Linux (amd64 and arm64). Either way Go must be installed: codegraph loads the analysed
+code through the `go` command. The rest of this guide runs
 from a clone, with `go run ./cmd/codegraph` or the Makefile; with the binary installed, `codegraph` does the same.
 
 **3. Try the samples.** `testdata/` holds small services (an HTTP API with a Kafka producer, a gRPC service, consumers
@@ -888,6 +890,7 @@ rather than guesses.
 make test       # gofmt, go vet, the unit tests and the golden test over testdata/ (go test -short skips the golden test)
 make cover      # statement coverage of the whole suite; fails under COVER_MIN (70%)
 make samples    # the samples' run, in tmp/samples
+make release VERSION=v1.2.0   # the release binaries, in bin/
 ```
 
 Each responsibility is its own package under `internal/` (see [Layout](#layout)), wired in `cmd/codegraph/main.go`.
@@ -895,6 +898,11 @@ The samples under `testdata/` (each its own module, offline, with local stubs fo
 golden test, `cmd/codegraph/main_test.go`, checks. `.github/workflows/test.yml` runs `make test` and `make cover` on
 every push and pull request. `CLAUDE.md` holds the design decisions and conventions behind the code, for contributors
 and coding agents alike.
+
+**Releases:** `make release VERSION=v1.2.0` builds `bin/codegraph-v1.2.0-{darwin,linux}-{amd64,arm64}` (static,
+stripped, the version stamped in: `codegraph version` prints it) and `bin/SHA256SUMS`; upload those to the GitHub
+release. Without `VERSION`, `git describe` names them (the latest tag, plus `-dirty` with uncommitted changes).
+`PLATFORMS` and `DIST` change the targets and the directory; `bin/` is git-ignored.
 
 ## License
 

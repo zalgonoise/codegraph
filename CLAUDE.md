@@ -28,6 +28,7 @@ make test       # gofmt, go vet, go test ./... (with PROFILE, the profile's rule
 make cover      # the suite's statement coverage over every package (-coverpkg=./...); fails under COVER_MIN (70)
 make samples    # analyse the samples into tmp/samples and link them
 make docker-test  # the same tests in the toolchain image (Dockerfile); make docker-graph: make graph in it
+make release VERSION=v1.2.0  # bin/codegraph-<version>-<os>-<arch> for darwin and linux, amd64 and arm64, and SHA256SUMS
 make help       # every target; make graph, inventory, deploy, query, diff and audit take PROFILE=<dir>
 
 # the samples by hand
