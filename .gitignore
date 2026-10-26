@@ -1,5 +1,7 @@
 # outputs: runs, inventories, samples and built binaries
 tmp/
+# release builds (make release)
+bin/
 _system/
 # an organisation's profile kept inside this directory (see README "Profiles")
 /profile/
