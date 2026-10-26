@@ -59,6 +59,12 @@ KBCHECK         ?=
 DENYLIST        ?=
 SAMPLES_OUT     ?= tmp/samples
 COVER_MIN       ?= 70
+# Release builds (make release): the version they report, the platforms
+# (os/arch) and where they go.
+VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
+PLATFORMS       ?= darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+DIST            ?= bin
+SHA256          ?= $(if $(shell command -v sha256sum 2>/dev/null),sha256sum,shasum -a 256)
 IMAGE           ?= codegraph
 DOCKER          ?= docker
 GOMODCACHE      ?= $(shell go env GOMODCACHE 2>/dev/null || echo $(HOME)/go/pkg/mod)
@@ -73,7 +79,7 @@ SYSTEM = $(OUT)/_system
 # status records every repository's git status, to show the run changed none.
 status = for r in $(REPOS); do echo "== $$r"; git -C "$$r" status --porcelain 2>/dev/null || echo "(not a git repository)"; done > $(1)
 
-.PHONY: help org graph check fleet inventory deploy kbcheck diff query open samples test cover audit clean mcp-build mcp-desktop docker-image docker-test docker-graph
+.PHONY: help org graph check fleet inventory deploy kbcheck diff query open samples test cover audit release clean mcp-build mcp-desktop docker-image docker-test docker-graph
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -177,6 +183,14 @@ audit: ## Check that no file of this repository contains a word of DENYLIST (a p
 	test -n "$$files" || { echo "audit: no file to check"; exit 1; }; \
 	if grep -n -i -w -F -f tmp/.denylist $$files; then echo "audit: the files above name what $(DENYLIST) lists"; exit 1; \
 	else echo "audit: no file names any of the $$(wc -l < tmp/.denylist | tr -d ' ') words of $(DENYLIST)"; fi
+
+release: ## Build codegraph for PLATFORMS (macOS and Linux, amd64 and arm64) into DIST (bin/) with SHA256SUMS; VERSION=v1.2.0 names them
+	@mkdir -p $(DIST) && rm -f $(DIST)/codegraph-* $(DIST)/SHA256SUMS
+	@for p in $(PLATFORMS); do os=$${p%/*}; arch=$${p#*/}; out=$(DIST)/codegraph-$(VERSION)-$$os-$$arch; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $$out ./cmd/codegraph || exit 1; \
+		echo "$$out"; done
+	@cd $(DIST) && $(SHA256) codegraph-* > SHA256SUMS
+	@echo "$(DIST)/SHA256SUMS: upload it with the binaries"
 
 clean: ## Remove the outputs of graph, inventory and samples, and the built binary
 	rm -rf $(OUT) $(OUT).prev $(INVENTORY) $(SAMPLES_OUT) $(BIN)
