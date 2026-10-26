@@ -80,6 +80,7 @@ Usage:
   codegraph mcp [-run dir]                  serve those answers over MCP (stdin and stdout)
   codegraph inventory -root dir [-focus f [-run dir] [-rings n]]  scan every repository cheaply; suggest which to analyse in full
   codegraph deploy -chart dir [-inventory f] [-run dir]  what an environment runs (helm template, offline), matched to services
+  codegraph version                         print the version
 
 Run "codegraph <command> -h" for a command's flags (query -h also lists the questions).
 `
@@ -111,6 +112,9 @@ func main() {
 		err = runInventory(os.Args[2:])
 	case "deploy":
 		err = runDeploy(os.Args[2:])
+	case "version", "-version", "--version":
+		fmt.Println("codegraph", buildVersion())
+		return
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return
@@ -1116,16 +1120,27 @@ func runMCP(args []string) error {
 	if err != nil {
 		return err
 	}
-	version := "devel"
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		version = bi.Main.Version
-	}
 	logf("mcp: answering from %s", dir)
 	if ms, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(ms) == 0 {
 		// Clients such as Claude Desktop start servers outside the repository, so a relative -run misses.
 		logf("mcp: no run in %s yet: answers will fail until make graph writes one there, or -run names the run's absolute path", dir)
 	}
-	return mcpserver.New(dir, version, cfg.Explorer, cfg.Inventory).Run(context.Background(), &mcp.StdioTransport{})
+	return mcpserver.New(dir, buildVersion(), cfg.Explorer, cfg.Inventory).Run(context.Background(), &mcp.StdioTransport{})
+}
+
+// version is set by release builds (make release: -ldflags "-X main.version=v1.2.0").
+var version string
+
+// buildVersion is the release build's version, else the module version go
+// install recorded (codegraph@v1.2.0), else "devel".
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "devel"
 }
 
 // commandRoots lists the CLI commands detected (transport cli, role command)
