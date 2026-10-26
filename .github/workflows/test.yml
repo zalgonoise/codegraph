@@ -1,0 +1,24 @@
+# The tests and the coverage minimum on every push and pull request: the same
+# make targets as locally (the golden test analyses the offline samples, so it
+# needs nothing beyond Go).
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt, go vet and the tests
+        run: make test
+      - name: coverage (minimum 70%)
+        run: make cover
