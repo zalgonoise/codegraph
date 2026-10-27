@@ -5,7 +5,8 @@ description: Answer questions about the architecture of Go services analysed by 
 
 # Architecture questions with codegraph
 
-1. **Find the run.** It is `tmp/graph` in this repository (`make graph`), or the `OUT` of the profile in use. If it
+1. **Find the run.** It is `tmp/graph` in this repository (`make graph`), the `OUT` of the profile in use, or a
+   bundle file someone shared (`codegraph bundle`; every `-run` takes one). If it
    has no `AGENTS.md`, ask the user before making one: `make graph` analyses every repository it is given and can
    take a while.
 2. **Read the run's `AGENTS.md` once.** It has the vocabulary, the commands with examples from the run, and the rules
