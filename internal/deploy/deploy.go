@@ -25,6 +25,7 @@ const Secret = "(secret)"
 
 // Deployment is one environment.
 type Deployment struct {
+	Codegraph   string     `json:"codegraph,omitempty"` // the codegraph version that wrote it
 	Environment string     `json:"environment"`
 	Source      string     `json:"source"`
 	Workloads   []Workload `json:"workloads"`
