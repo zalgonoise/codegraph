@@ -31,6 +31,7 @@ import (
 
 // Inventory is the scan of a set of repositories.
 type Inventory struct {
+	Codegraph string     `json:"codegraph,omitempty"` // the codegraph version that wrote it
 	Repos     []Repo     `json:"repos"`
 	Contracts []Contract `json:"contracts,omitempty"` // the gRPC services the contracts catalogues define
 
