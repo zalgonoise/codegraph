@@ -59,9 +59,14 @@ KBCHECK         ?=
 DENYLIST        ?=
 SAMPLES_OUT     ?= tmp/samples
 COVER_MIN       ?= 70
-# Release builds (make release): the version they report, the platforms
-# (os/arch) and where they go.
-VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
+# The version codegraph reports (codegraph version) and writes into what it
+# produces (manifests, inventory, deployment, bundles): git describe's, the
+# latest tag (v1.0.1, or v1.0.1-3-gabc1234 past it, -dirty with changes), unless
+# set. Release builds (make release): their platforms (os/arch) and directory.
+ifeq ($(origin VERSION),undefined)
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
+endif
+LDFLAGS         = -X main.version=$(VERSION)
 PLATFORMS       ?= darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
 DIST            ?= bin
 SHA256          ?= $(if $(shell command -v sha256sum 2>/dev/null),sha256sum,shasum -a 256)
@@ -71,15 +76,18 @@ GOMODCACHE      ?= $(shell go env GOMODCACHE 2>/dev/null || echo $(HOME)/go/pkg/
 NETRC           ?= $(wildcard $(HOME)/.netrc)
 BIN             ?= tmp/bin/codegraph
 BASE            ?= $(OUT).prev
+# make bundle: the file (.tar.zst for zstd) and options (-no-settings -no-positions).
+BUNDLE          ?= $(OUT).tar.gz
+BUNDLE_FLAGS    ?=
 
 # ---- targets --------------------------------------------------------------------
-CODEGRAPH ?= go run ./cmd/codegraph
+CODEGRAPH ?= go run -ldflags "$(LDFLAGS)" ./cmd/codegraph
 SYSTEM = $(OUT)/_system
 
 # status records every repository's git status, to show the run changed none.
 status = for r in $(REPOS); do echo "== $$r"; git -C "$$r" status --porcelain 2>/dev/null || echo "(not a git repository)"; done > $(1)
 
-.PHONY: help org graph check fleet inventory deploy kbcheck diff query open samples test cover audit release clean mcp-build mcp-desktop docker-image docker-test docker-graph
+.PHONY: help org graph check fleet inventory deploy kbcheck diff query open samples test cover audit bundle release clean mcp-build mcp-desktop docker-image docker-test docker-graph
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -144,7 +152,7 @@ query: ## Ask the last run: make query Q='who <topic>' (go run ./cmd/codegraph q
 	@$(CODEGRAPH) query -run $(OUT) $(Q)
 
 mcp-build: ## Build codegraph for MCP clients that need a binary (tmp/bin/codegraph); rebuild after code changes
-	go build -o $(BIN) ./cmd/codegraph
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/codegraph
 
 mcp-desktop: mcp-build ## Print the Claude Desktop entry for the codegraph MCP server (absolute paths)
 	@echo 'Add to "mcpServers" in ~/Library/Application Support/Claude/claude_desktop_config.json, then restart Claude Desktop:'
@@ -184,10 +192,14 @@ audit: ## Check that no file of this repository contains a word of DENYLIST (a p
 	if grep -n -i -w -F -f tmp/.denylist $$files; then echo "audit: the files above name what $(DENYLIST) lists"; exit 1; \
 	else echo "audit: no file names any of the $$(wc -l < tmp/.denylist | tr -d ' ') words of $(DENYLIST)"; fi
 
+bundle: ## Pack the last run into one file to share (BUNDLE: $(OUT).tar.gz, .tar.zst for zstd), with its deployment and inventory; BUNDLE_FLAGS=-no-settings -no-positions leave those out
+	@test -d $(OUT) || { echo "no run in $(OUT) yet: make graph"; exit 1; }
+	$(CODEGRAPH) bundle -run $(OUT) $(if $(wildcard $(INVENTORY)/inventory.json),-inventory $(INVENTORY)/inventory.json) -out $(BUNDLE) $(BUNDLE_FLAGS)
+
 release: ## Build codegraph for PLATFORMS (macOS and Linux, amd64 and arm64) into DIST (bin/) with SHA256SUMS; VERSION=v1.2.0 names them
 	@mkdir -p $(DIST) && rm -f $(DIST)/codegraph-* $(DIST)/SHA256SUMS
 	@for p in $(PLATFORMS); do os=$${p%/*}; arch=$${p#*/}; out=$(DIST)/codegraph-$(VERSION)-$$os-$$arch; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $$out ./cmd/codegraph || exit 1; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w $(LDFLAGS)" -o $$out ./cmd/codegraph || exit 1; \
 		echo "$$out"; done
 	@cd $(DIST) && $(SHA256) codegraph-* > SHA256SUMS
 	@echo "$(DIST)/SHA256SUMS: upload it with the binaries"
@@ -212,7 +224,7 @@ DOCKER_RUN = $(DOCKER) run --rm \
 	$(if $(GOPRIVATE),-e GOPRIVATE=$(GOPRIVATE)) $(if $(GOPROXY),-e GOPROXY=$(GOPROXY))
 
 docker-image: ## Build the toolchain image (Go, pkg-config and libxml2, python3)
-	$(DOCKER) build -t $(IMAGE) .
+	$(DOCKER) build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
 docker-test: docker-image ## make test in the image
 	$(DOCKER) run --rm $(IMAGE) make test
