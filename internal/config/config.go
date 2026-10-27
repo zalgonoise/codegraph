@@ -157,6 +157,45 @@ func ParseInventory(args []string) (*Inventory, error) {
 const explorerUsage = "the explorer page answers link to: empty for the run's own <run>/_system/system.html (a file:// URL), " +
 	"\"none\" for no links, or the page's URL when it is served elsewhere"
 
+// Bundle configures `codegraph bundle`.
+type Bundle struct {
+	Run         string // a run directory, or a bundle to pack again
+	Out         string // the bundle file ("" for <run>.tar.gz, or .tar.zst with zstd)
+	Compression string // gzip or zstd ("" for what Out's ending says)
+	Inventory   string // an inventory.json instead of the run's; "none" for none
+	NoSettings  bool
+	NoPositions bool
+}
+
+// ParseBundle parses `codegraph bundle` flags.
+func ParseBundle(args []string) (*Bundle, error) {
+	fs := flag.NewFlagSet("bundle", flag.ContinueOnError)
+	c := &Bundle{}
+	fs.StringVar(&c.Run, "run", "tmp/graph", "the run to pack: a run directory, or a bundle to pack again (with other options)")
+	fs.StringVar(&c.Out, "out", "", "the bundle to write; default <run>.tar.gz (<run>.tar.zst with -compress zstd)")
+	fs.StringVar(&c.Compression, "compress", "", "gzip or zstd; default: what -out's ending says (.zst: zstd), else gzip")
+	fs.StringVar(&c.Inventory, "inventory", "", "the inventory to include (an inventory.json, or its directory); default the run's own "+
+		"(<run>/inventory.json, else <run>/../inventory); \"none\" for none")
+	fs.BoolVar(&c.NoSettings, "no-settings", false, "leave out the values the environment configures: the deployment's variables keep their names, the address check's settings and mocks their names only")
+	fs.BoolVar(&c.NoPositions, "no-positions", false, "leave out every file reference: file:line positions in the code, declaration and Dockerfile names, the chart's directory")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: codegraph bundle [-run dir|bundle] [-out file] [-compress gzip|zstd] [-inventory file|none] [-no-settings] [-no-positions]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if fs.NArg() > 0 {
+		return nil, fmt.Errorf("bundle: unexpected arguments %v", fs.Args())
+	}
+	switch c.Compression {
+	case "", "gzip", "zstd":
+	default:
+		return nil, fmt.Errorf("bundle: -compress must be gzip or zstd, got %q", c.Compression)
+	}
+	return c, nil
+}
+
 // inventoryUsage describes -inventory, for query and mcp.
 const inventoryUsage = "the inventory image questions read (an inventory.json, or its directory); empty for the one next to the run, <run>/../inventory"
 

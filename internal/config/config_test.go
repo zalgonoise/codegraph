@@ -67,3 +67,15 @@ func TestParseLibrary(t *testing.T) {
 		t.Errorf("fleet -libraries = %+v, %v (Library is set per repository)", f, err)
 	}
 }
+
+func TestParseBundle(t *testing.T) {
+	c, err := ParseBundle([]string{"-run", "tmp/graph", "-out", "x.tar.zst", "-no-settings", "-no-positions"})
+	if err != nil || c.Run != "tmp/graph" || c.Out != "x.tar.zst" || c.Compression != "" || !c.NoSettings || !c.NoPositions {
+		t.Fatalf("ParseBundle = %+v, %v", c, err)
+	}
+	for _, args := range [][]string{{"-compress", "lz4"}, {"extra"}} {
+		if _, err := ParseBundle(args); err == nil {
+			t.Errorf("ParseBundle(%v) should fail", args)
+		}
+	}
+}
