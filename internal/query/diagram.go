@@ -41,6 +41,11 @@ func explorerPage(dir string) string {
 	if !fileExists(file) {
 		return ""
 	}
+	return fileURL(file)
+}
+
+// fileURL is the file:// URL of a file ("" when its path cannot be made absolute).
+func fileURL(file string) string {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return ""

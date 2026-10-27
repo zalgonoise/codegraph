@@ -12,15 +12,14 @@ import (
 	"cmp"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/zalgonoise/codegraph/internal/bundle"
 	"github.com/zalgonoise/codegraph/internal/deploy"
 	"github.com/zalgonoise/codegraph/internal/inventory"
 	"github.com/zalgonoise/codegraph/internal/link"
-	"github.com/zalgonoise/codegraph/internal/manifest"
 	"github.com/zalgonoise/codegraph/internal/model"
 )
 
@@ -32,6 +31,7 @@ type Run struct {
 	System    *model.System
 	Deploy    *deploy.Deployment
 	Inventory *inventory.Inventory // the organisation's inventory, for image questions (UseInventory)
+	Bundle    *bundle.Metadata     // when the run was read from a bundle
 	Explorer  string               // the explorer page answers link to ("" for none; see UseExplorer)
 
 	services  map[string]*model.Manifest
@@ -53,30 +53,20 @@ type journey struct {
 	j       model.Journey
 }
 
-// Load reads <dir>/*/manifest.json and links the services.
-func Load(dir string) (*Run, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "*", "manifest.json"))
+// Load reads a run, a directory (<dir>/<service>/manifest.json, with its
+// deployment and inventory) or a bundle (codegraph bundle), and links the
+// services.
+func Load(path string) (*Run, error) {
+	src, err := bundle.Load(path, "")
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no manifests in %s: run `make graph` first, or point -run at a run directory", dir)
-	}
-	ms, err := manifest.ReadAll(paths)
-	if err != nil {
-		return nil, err
-	}
-	r := New(dir, ms, link.Link(ms))
-	r.Explorer = explorerPage(dir)
-	if file := filepath.Join(dir, "deploy", "deploy.json"); fileExists(file) {
-		if r.Deploy, err = deploy.ReadFile(file); err != nil {
-			return nil, err
-		}
-	}
-	if file := filepath.Join(filepath.Dir(filepath.Clean(dir)), "inventory", "inventory.json"); fileExists(file) {
-		if err := r.UseInventory(file); err != nil {
-			return nil, err
-		}
+	r := New(path, src.Manifests, link.Link(src.Manifests))
+	r.Deploy, r.Inventory, r.Bundle = src.Deploy, src.Inventory, src.Meta
+	if src.Meta == nil {
+		r.Explorer = explorerPage(path)
+	} else if page, err := bundle.ExplorerPage(src, path); err == nil {
+		r.Explorer = fileURL(page) // a bundle's page, written once to the user's cache
 	}
 	return r, nil
 }

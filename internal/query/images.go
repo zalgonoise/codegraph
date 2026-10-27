@@ -1,13 +1,11 @@
 package query
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
+	"github.com/zalgonoise/codegraph/internal/bundle"
 	"github.com/zalgonoise/codegraph/internal/inventory"
 )
 
@@ -42,18 +40,11 @@ func (r *Run) UseInventory(file string) error {
 	if file == "" {
 		return nil
 	}
-	if st, err := os.Stat(file); err == nil && st.IsDir() {
-		file = filepath.Join(file, "inventory.json")
-	}
-	data, err := os.ReadFile(file)
+	inv, err := bundle.ReadInventory(file)
 	if err != nil {
 		return err
 	}
-	var inv inventory.Inventory
-	if err := json.Unmarshal(data, &inv); err != nil {
-		return fmt.Errorf("%s: %w", file, err)
-	}
-	r.Inventory = &inv
+	r.Inventory = inv
 	return nil
 }
 
@@ -168,4 +159,28 @@ func ImageMarkdown(a ImageAnswer) string {
 		fmt.Fprintf(&b, "\n_%s._\n", a.Note)
 	}
 	return b.String()
+}
+
+// bundleNote says, for a run read from a bundle, when and by which codegraph it
+// was made and what it leaves out: answers are as old as the bundle.
+func (r *Run) bundleNote() string {
+	m := r.Bundle
+	if m == nil {
+		return ""
+	}
+	note := fmt.Sprintf("\n_From a bundle made %s by codegraph %s", m.Created.Format("2006-01-02 15:04 MST"), m.Codegraph)
+	if len(m.AnalysedBy) > 0 {
+		note += " (analysed by " + strings.Join(m.AnalysedBy, ", ") + ")"
+	}
+	var left []string
+	if m.NoSettings {
+		left = append(left, "configured values")
+	}
+	if m.NoPositions {
+		left = append(left, "file:line positions")
+	}
+	if len(left) > 0 {
+		note += "; it leaves out " + strings.Join(left, " and ")
+	}
+	return note + "._\n"
 }

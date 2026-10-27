@@ -83,6 +83,7 @@ func Context(r *Run) string {
 	fmt.Fprintf(&b, "# System context\n\n%d services, %d links; a static analysis of their Go code by codegraph. "+
 		"A journey is what an inbound endpoint (route, gRPC method, consumed topic or queue) does; `->` sync, `-)` async; "+
 		"`*` is a part the analysis could not resolve.\n", len(r.Manifests), len(r.System.Links))
+	b.WriteString(r.bundleNote())
 	for _, s := range r.Services() {
 		m := r.services[s.Name]
 		switch {

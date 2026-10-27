@@ -53,7 +53,7 @@ func Answer(r *Run, args []string, opts Options) (string, error) {
 	switch cmd {
 	case "services":
 		ss := r.Services()
-		v, md, pages = ss, ServicesMarkdown(ss), []page{homePage()}
+		v, md, pages = ss, ServicesMarkdown(ss)+r.bundleNote(), []page{homePage()}
 	case "service":
 		if err = need(1, "service <name>"); err == nil {
 			var d *ServiceDetail

@@ -40,6 +40,9 @@ codegraph query -run $R [-json] [-depth N] [-diagram] <command> [args]
   image (with the file, line and Dockerfile), those that only use it (Dockerfiles' `FROM`, Helm values,
   manifests), and the containers of the run's deployment running it, with the repository each was matched to. It
   needs the inventory next to the run (`codegraph inventory`); a third-party image has users but no builder.
+- **Bundles:** a run can be one file (`codegraph bundle`; `-run run.tar.gz`). Answers from one say when it was made
+  and whether it leaves out configured values or `file:line` positions: say so when it matters, and that the answers
+  are as old as the bundle.
 - **Start broad** (`services`, `search`), then narrow (`service`, `journey`, `who`).
 - **What a change affects:** `impact <service>` lists every journey that reaches the service by any call or message,
   each once by its nearest way in, with the chain of services it crosses. For an API change, narrow it to one
