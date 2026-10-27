@@ -31,6 +31,7 @@ const (
 
 // Manifest is the per-service output of `codegraph analyze`.
 type Manifest struct {
+	Codegraph  string            `json:"codegraph,omitempty"` // the codegraph version that wrote it
 	Service    string            `json:"service"`
 	Aliases    []string          `json:"aliases,omitempty"`
 	Tags       map[string]string `json:"tags,omitempty"`
