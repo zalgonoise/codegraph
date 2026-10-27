@@ -26,7 +26,9 @@ WORKDIR /codegraph
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /usr/local/bin/codegraph ./cmd/codegraph
+# The version it reports and writes into its outputs (make docker-image passes git describe's).
+ARG VERSION=devel
+RUN go build -ldflags "-X main.version=${VERSION}" -o /usr/local/bin/codegraph ./cmd/codegraph
 
 # The Makefile runs the installed binary instead of go run.
 ENV CODEGRAPH=codegraph
