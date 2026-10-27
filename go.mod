@@ -3,6 +3,7 @@ module github.com/zalgonoise/codegraph
 go 1.27
 
 require (
+	github.com/klauspost/compress v1.20.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.42.0
