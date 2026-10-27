@@ -29,6 +29,7 @@ make cover      # the suite's statement coverage over every package (-coverpkg=.
 make samples    # analyse the samples into tmp/samples and link them
 make docker-test  # the same tests in the toolchain image (Dockerfile); make docker-graph: make graph in it
 make release VERSION=v1.2.0  # bin/codegraph-<version>-<os>-<arch> for darwin and linux, amd64 and arm64, and SHA256SUMS
+make bundle     # pack the last run into $(OUT).tar.gz (BUNDLE, BUNDLE_FLAGS=-no-settings -no-positions)
 make help       # every target; make graph, inventory, deploy, query, diff and audit take PROFILE=<dir>
 
 # the samples by hand
@@ -95,6 +96,7 @@ manifest.ReadAll → link (+ journey chains) → render   (codegraph link)
 | `internal/settings` | The environment variables a main reads: `env` tags of the types its reachable code converts to interfaces (with `envPrefix`), the fields of specs passed to kelseyhightower/envconfig's `Process`, and constant `os.Getenv` names outside the standard library; `Manifest.Settings` |
 | `internal/inventory/images.go` | Container images: `Images` (what a repository's CI and compose files build: shell `docker build/tag/push` with variables expanded, `build-push-action` tags, reusable workflows by `Conventions.WorkflowImage`, compose `build`+`image`, Jenkins `docker.build`), `References` (what it uses without building: `FROM`, compose, CI step images, Helm values, manifests), `Inventory.Builders`/`Referrers` |
 | `internal/deploy` | `codegraph deploy`: `render.go` runs `helm template` with masked secret values files; `deploy.go` reads the rendered objects (workloads, containers, settings, Services, routes); `match.go` matches each main container to a repository and an analysed service; `network.go` checks the run's gRPC and HTTP links against the configured addresses; `report.go` writes `deploy.md`; `view.go` reads `deploy.json` back and gives one service's view (`Deployment.View`), which `codegraph query service` and the explorer show |
+| `internal/bundle` | `codegraph bundle`: `Write` packs a run (manifests, deployment, inventory, a freshly drawn explorer, `bundle.json` metadata) into a tar compressed with gzip or zstd (`klauspost/compress`), applying `NoSettings` and `NoPositions`; `Read`/`ReadFrom` read one back (told by its magic bytes); `Load` reads a run directory or a bundle, which every command reading a run uses (`query.Load`, `readRun`); `ExplorerPage` writes a bundle's page to the user's cache |
 | `internal/diff` | `codegraph diff`: compares two runs (links both): links, services, endpoint signatures per service, unanswered topics; Markdown report, `-fail-on-links` for CI |
 | `Dockerfile`, `.dockerignore` | The toolchain image (Go, pkg-config + libxml2, python3, make; `CODEGRAPH=codegraph` prebuilt) for `make docker-*` |
 | `Makefile` | `make graph` (fleet, then with a profile the deployment and the knowledge base check, and the diff with the previous run; clones checked unchanged), `inventory`, `diff`, `open`, `samples`, `test`, `audit`, …; a profile's `profile.mk` sets its variables |
@@ -216,6 +218,24 @@ journey that reaches another service (a summary and the first steps above `maxSe
   Prometheus's handler, had no journey: its main journey covers 273 functions over 19 components (wav, fft, the
   exporters), with the sqlite connect, migrations and `headers`/`chunks` queries before the stream's `GET`, in
   program order. Libraries have none.
+- **Bundles** (`internal/bundle`, 2026-10-27): a deterministic tar (entries sorted, `bundle.json` first, every
+  mtime the creation date; gzip with no header time) of `bundle.json`, `<service>/manifest.json`,
+  `deploy/deploy.json`, `inventory.json` and `_system/system.html`, which `Write` draws again from the bundle's own
+  (possibly stripped) contents. `system.json` is left out: readers relink. `NoPositions` drops the JSON keys
+  `position`, `positions`, `file` and `dockerfile` everywhere in manifests and the inventory (a JSON round trip,
+  `clone`/`dropKeys`, so new position fields named that way are covered) and the deployment's `Source`;
+  `NoSettings` blanks container variables' values and cuts `NAME=value` to `NAME` in the address check's pairs,
+  settled and mocked entries. Both work on copies. `Metadata.Format` (1) is checked on read: a newer format is
+  refused with the version that wrote it. Reading keeps only expected names, regular files, at most 1 GB each.
+  `runBundle` writes through a temporary file and a rename, refuses to overwrite its input, and derives the output
+  name and compression from `-out` (`bundle.Compression`). `query.Run.Bundle` holds the metadata: `services` and
+  `context.md` say when the bundle was made, by which version, and what it leaves out.
+- **Versions** (2026-10-27): `main.version` (set by `-ldflags -X`, else the module version `go install` records, else
+  `devel`: `buildVersion`) is written into every manifest (`Manifest.Codegraph`, through `manifest.Input`), the
+  inventory (`Inventory.Codegraph`), the deployment (`Deployment.Codegraph`) and bundles (`Metadata.Codegraph`, and
+  the manifests' versions in `AnalysedBy`), and reported by `codegraph version` and the MCP server. The Makefile's
+  `VERSION` (`git describe --tags --always --dirty`, computed once) feeds `CODEGRAPH` (`go run -ldflags`),
+  `mcp-build`, `release` and the Docker image (`--build-arg VERSION`).
 - **Container images** (`internal/inventory/images.go`, 2026-10-26): `Repo.Images` are the images a repository
   builds, `Repo.References` those its files use without building (minus its own). Shell lines of CI files
   (`ciFiles`: Bitbucket, GitLab, GitHub workflows, CircleCI, Azure, Cloud Build, Jenkinsfiles, Makefiles, `*.mk`,
@@ -532,6 +552,18 @@ route; settings with only gRPC and OTel library variables; ports `:*`.
    `TestMatchBuilders`, `TestImage`. On a large organisation the inventory still takes seconds; matching a production
    chart with it corrected the repositories that name matching got wrong, and left only third-party images
    unmatched.
+
+9. **Done (2026-10-27): bundles and versions.** See Conventions ("Bundles", "Versions"). On a 92-service run: 1.4 MB
+   with gzip (written in 1.2 s), 915 KB with zstd (0.4 s); `query` from the bundle in 0.14 s and about 125 MB, the MCP
+   server likewise. Tests: `internal/bundle` (round trips, omissions on copies, determinism, refusals, directories and
+   the explorer cache), `TestCommands` (bundle, re-bundle stripped, query, diff, overwrite refused),
+   `TestParseBundle`.
+10. **Planned (asked 2026-10-27): an HTTP MCP server.** `codegraph mcp -http :8080`, the same tools over the MCP
+    SDK's streamable HTTP transport, so one central instance serves an always-current run (or bundle) to everyone.
+    To settle before building it: authentication and TLS in front of it (the run is internal architecture), whether
+    to reload the run as `mcp` does now, and how clients reach it (Claude Code connects to HTTP servers directly;
+    Claude Desktop goes through connectors, whose reachability needs checking for an internal-only server). Bundles
+    stay the offline way to share.
 
 For each item: a sample in `testdata` and the golden test, the check on authz (or a real library for item 5),
 README and this file updated, `make test`, `make samples` and `make audit` (with a profile's denylist) passing.

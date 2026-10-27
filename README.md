@@ -21,6 +21,8 @@ graphs). No instrumentation, no traffic, no hand-drawn diagrams to keep up to da
 - **See an organisation at a glance.** Every repository's languages, Go versions, in-house dependencies and their
   drift, messaging libraries and container images, read in seconds without building anything.
 - **Know a library's reach.** What each exported function of a library does, and which services and journeys call it.
+- **Share it.** `codegraph bundle` packs a run into one small file (a 90-service run is about 1 MB) that anyone's
+  `codegraph query` or MCP server reads directly: one machine analyses, everyone asks.
 
 ## What it answers
 
@@ -215,6 +217,7 @@ make test       # gofmt, go vet and the tests;  make cover: their coverage (mini
 make mcp-build  # build tmp/bin/codegraph for MCP clients;  make mcp-desktop: Claude Desktop's entry too
 make audit      # with a profile's DENYLIST: check that no file here names the organisation
 make docker-test  # the tests in the toolchain image;  make docker-graph: make graph in it
+make bundle     # pack the last run into one file to share (tmp/graph.tar.gz; BUNDLE_FLAGS=-no-settings -no-positions)
 make help       # every target
 ```
 
@@ -325,6 +328,7 @@ the analysed services' dependencies. Every responsibility is a separate package,
 | `internal/render` | Format-neutral graph → Mermaid, DOT, Markdown; the interactive system explorer (`system.html`) |
 | `internal/link` | Cross-service matching into a system graph; journeys chained across services |
 | `internal/diff` | Compares two runs: links, services, endpoint signatures, unanswered endpoints (`codegraph diff`) |
+| `internal/bundle` | Packs a run into one gzip or zstd file and reads runs back, from a directory or a bundle (`codegraph bundle`) |
 | `internal/query` | Answers questions about a run (`codegraph query`: services, journeys, keys, paths, impact, library API use, container images), and writes `AGENTS.md` and `context.md` for AI agents |
 | `internal/mcpserver` | The same answers over MCP (`codegraph mcp`) |
 | `internal/inventory` | Reads every repository of the organisation without building it (languages, Go modules, the container images each builds and uses), and finds the frontier around a focus (`codegraph inventory`) |
@@ -807,6 +811,45 @@ To connect it:
     "mcp", "-run", "/…/codegraph/tmp/graph"]`; it starts in about two seconds, but needs `go` on Claude Desktop's
     `PATH` and fails while the code does not compile.
 
+## Sharing a run: bundles
+
+A run is a directory of manifests, tens of MB with the system view. To share it, `codegraph bundle` packs what
+questions need into one file: the manifests, the deployment, the inventory, the explorer, and metadata. A 90-service
+run makes a bundle of about 1.4 MB with gzip, or 0.9 MB with zstd.
+
+```sh
+codegraph bundle -run tmp/graph                       # tmp/graph.tar.gz
+codegraph bundle -run tmp/graph -out run.tar.zst      # zstd (also -compress zstd)
+codegraph bundle -run tmp/graph -no-settings -no-positions -out shared.tar.gz
+make bundle BUNDLE_FLAGS=-no-settings                 # the last make graph run, with its inventory
+```
+
+Every command that reads a run reads a bundle the same way: `-run run.tar.gz` for `query`, `mcp`, `diff`, `deploy`
+and `inventory`. A central machine can run `make inventory`, `make graph` and `make bundle` on a schedule and publish
+the file; everyone else points their own `codegraph mcp` at their copy, which it reloads when the file is replaced.
+
+- **Contents:** `bundle.json` (the metadata), `<service>/manifest.json`, `deploy/deploy.json` and `inventory.json`
+  when the run has them, and `_system/system.html`. Extracted (`tar xf`), it is a run directory. The system view is
+  left out: readers link the manifests again on load, in about a second.
+- **Options:**
+  - `-no-settings`: leave out the values an environment configures. The deployment's variables keep their names, and
+    the address check's settings and the mocks keep their names only.
+  - `-no-positions`: leave out every file reference: `file:line` positions, declaration and Dockerfile names, the
+    chart's directory.
+  - `-inventory <file|none>`: an inventory other than the run's own (`<run>/inventory.json`, else `<run>/../inventory`),
+    or none.
+  - `-compress gzip|zstd`: gzip by default, zstd when `-out` ends in `.zst`.
+
+  A bundle can be packed again (`-run run.tar.gz`) with other options, to strip it before sharing it further.
+- **Answers** from a bundle say when it was made, by which codegraph, and what it leaves out. Its explorer page is
+  written once to the user's cache (`~/Library/Caches/codegraph/bundles/` on macOS, `~/.cache/codegraph/bundles/` on
+  Linux) for answers to link to.
+- **Versions:** the metadata records its format, the codegraph version that wrote it and those that analysed its
+  manifests (each manifest, the inventory and the deployment record their own). A codegraph reading a bundle of a
+  newer format refuses it and says which version wrote it.
+- **What it holds:** the architecture of every service in it, and, without `-no-settings`, the configuration values
+  of the deployment (never secrets: their values are not read). Share it as you would the code.
+
 ## Reviewing changes
 
 `codegraph diff -base <run> -head <run>` compares two runs, each a directory of service manifests as `analyze` and `fleet`
@@ -898,6 +941,10 @@ The samples under `testdata/` (each its own module, offline, with local stubs fo
 golden test, `cmd/codegraph/main_test.go`, checks. `.github/workflows/test.yml` runs `make test` and `make cover` on
 every push and pull request. `CLAUDE.md` holds the design decisions and conventions behind the code, for contributors
 and coding agents alike.
+
+**Versions:** codegraph writes its version into what it produces: each manifest, the inventory, the deployment and
+every bundle record it (`codegraph`), and `codegraph version` prints it. The Makefile builds and runs codegraph with
+`git describe`'s version (the latest tag, plus the commits past it and `-dirty`), or `VERSION=` when set.
 
 **Releases:** `make release VERSION=v1.2.0` builds `bin/codegraph-v1.2.0-{darwin,linux}-{amd64,arm64}` (static,
 stripped, the version stamped in: `codegraph version` prints it) and `bin/SHA256SUMS`; upload those to the GitHub
