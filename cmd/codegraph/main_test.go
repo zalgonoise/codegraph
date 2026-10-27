@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zalgonoise/codegraph/internal/bundle"
 	"github.com/zalgonoise/codegraph/internal/config"
 	"github.com/zalgonoise/codegraph/internal/deploy"
 	"github.com/zalgonoise/codegraph/internal/manifest"
@@ -994,6 +995,45 @@ spec:
 		if !strings.Contains(answer, s) {
 			t.Errorf("query image lacks %q:\n%s", s, answer)
 		}
+	}
+
+	// The run as one file: with the inventory next to it and the deployment;
+	// questions, diff and a second bundle read it like the directory.
+	gz, zst := filepath.Join(dir, "run.tar.gz"), filepath.Join(dir, "private.tar.zst")
+	if err := runBundle([]string{"-run", run, "-out", gz}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runBundle([]string{"-run", gz, "-out", zst, "-no-settings", "-no-positions"}); err != nil { // packed again, stripped
+		t.Fatal(err)
+	}
+	answer = captureStdout(t, func() error { return runQuery([]string{"-run", gz, "-explorer", "none", "image", "team-orders"}) })
+	if !strings.Contains(answer, "- **orders** builds `team-orders`:`release-*` @ `bitbucket-pipelines.yml:12`") {
+		t.Errorf("image from a bundle:\n%s", answer)
+	}
+	answer = captureStdout(t, func() error { return runQuery([]string{"-run", zst, "-explorer", "none", "services"}) })
+	if !strings.Contains(answer, "2 services") || !strings.Contains(answer, "it leaves out configured values and file:line positions") {
+		t.Errorf("services from a stripped bundle:\n%s", answer)
+	}
+	b, err := bundle.Read(zst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env := b.Deploy.Workloads[0].Containers[0].Env; env["INVENTORY_URL"] != "" || len(env) != 1 {
+		t.Errorf("-no-settings left values: %v", env)
+	}
+	for _, m := range b.Manifests {
+		for _, ep := range m.Endpoints {
+			if ep.Position != "" {
+				t.Errorf("-no-positions left %s's %s", m.Service, ep.Position)
+			}
+		}
+	}
+	report := filepath.Join(dir, "bundle-diff.md")
+	if err := runDiff([]string{"-base", run, "-head", gz, "-out", report, "-fail-on-links"}); err != nil {
+		t.Errorf("a run against its own bundle: %v", err)
+	}
+	if err := runBundle([]string{"-run", gz, "-out", gz}); err == nil {
+		t.Error("a bundle written over the one it reads should be refused")
 	}
 }
 

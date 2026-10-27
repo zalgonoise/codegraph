@@ -43,6 +43,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/zalgonoise/codegraph/internal/bundle"
 	"github.com/zalgonoise/codegraph/internal/components"
 	"github.com/zalgonoise/codegraph/internal/config"
 	"github.com/zalgonoise/codegraph/internal/declared"
@@ -80,6 +81,7 @@ Usage:
   codegraph mcp [-run dir]                  serve those answers over MCP (stdin and stdout)
   codegraph inventory -root dir [-focus f [-run dir] [-rings n]]  scan every repository cheaply; suggest which to analyse in full
   codegraph deploy -chart dir [-inventory f] [-run dir]  what an environment runs (helm template, offline), matched to services
+  codegraph bundle [-run dir] [-out file]  pack a run into one file to share (gzip or zstd); query, mcp and diff read it with -run
   codegraph version                         print the version
 
 Run "codegraph <command> -h" for a command's flags (query -h also lists the questions).
@@ -112,6 +114,8 @@ func main() {
 		err = runInventory(os.Args[2:])
 	case "deploy":
 		err = runDeploy(os.Args[2:])
+	case "bundle":
+		err = runBundle(os.Args[2:])
 	case "version", "-version", "--version":
 		fmt.Println("codegraph", buildVersion())
 		return
@@ -375,6 +379,7 @@ func analyzeReach(cfg *config.Analyze, ws *loader.Workspace, prog *program.Progr
 	}
 
 	return manifest.Build(manifest.Input{
+		Codegraph:  buildVersion(),
 		Service:    name,
 		Aliases:    aliases,
 		Tags:       tags,
@@ -683,6 +688,7 @@ func writeDeclared(dir string, cfg *config.Analyze) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		m.Codegraph = buildVersion()
 		out := filepath.Join(cfg.Out, m.Service)
 		if err := writeService(out, m, cfg); err != nil {
 			return nil, err
@@ -767,6 +773,7 @@ func runInventory(args []string) error {
 		return err
 	}
 	inv := inventory.Scan(dirs, prof.Conventions)
+	inv.Codegraph = buildVersion()
 	names := prof.Catalogues
 	if cfg.CataloguesSet {
 		names = cfg.Catalogues
@@ -1017,6 +1024,7 @@ func runDeploy(args []string) error {
 	if err != nil {
 		return err
 	}
+	d.Codegraph = buildVersion()
 
 	// Match workloads to repositories (inventory) and analysed services (run).
 	repos, analysed, languages := deploy.Repos{}, deploy.Analysed{}, map[string][]string{}
@@ -1161,15 +1169,102 @@ func commandRoots(dets []transport.Detection) []entrypoint.Command {
 }
 
 // readRun reads the service manifests of a run directory.
-func readRun(dir string) ([]*model.Manifest, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "*", "manifest.json"))
+// ---- bundle -------------------------------------------------------------------
+
+// runBundle packs a run (or a bundle, to change its options) into one file.
+func runBundle(args []string) error {
+	cfg, err := config.ParseBundle(args)
+	if err != nil {
+		return err
+	}
+	inv := cfg.Inventory
+	if inv == "none" {
+		inv = ""
+	}
+	r, err := bundle.Load(cfg.Run, inv)
+	if err != nil {
+		return err
+	}
+	if cfg.Inventory == "none" {
+		r.Inventory = nil
+	}
+	compression := cfg.Compression
+	if compression == "" {
+		compression = bundle.Compression(cfg.Out)
+	}
+	out := cfg.Out
+	if out == "" {
+		base := strings.TrimRight(filepath.Clean(cfg.Run), string(filepath.Separator))
+		if bundle.IsBundle(cfg.Run) {
+			base = strings.TrimSuffix(strings.TrimSuffix(base, ".gz"), ".zst")
+			base = strings.TrimSuffix(strings.TrimSuffix(base, ".tar"), ".tgz") + ".repacked"
+		}
+		out = base + ".tar.gz"
+		if compression == bundle.Zstd {
+			out = base + ".tar.zst"
+		}
+	}
+	if abs, _ := filepath.Abs(out); abs != "" {
+		if in, _ := filepath.Abs(cfg.Run); in == abs {
+			return fmt.Errorf("bundle: -out %s would overwrite the bundle it reads", out)
+		}
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(out), "."+filepath.Base(out)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	meta, err := bundle.Write(tmp, r, bundle.Options{
+		Compression: compression, NoSettings: cfg.NoSettings, NoPositions: cfg.NoPositions, Version: buildVersion(),
+	})
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), out); err != nil { // whole, or not at all: an MCP server may be reading it
+		return err
+	}
+	st, err := os.Stat(out)
+	if err != nil {
+		return err
+	}
+	what := count(meta.Services, "service", "services")
+	if meta.Libraries > 0 {
+		what += ", " + count(meta.Libraries, "library", "libraries")
+	}
+	if meta.Environment != "" {
+		what += ", the " + meta.Environment + " deployment"
+	}
+	if meta.Inventory {
+		what += ", the inventory"
+	}
+	var left []string
+	if meta.NoSettings {
+		left = append(left, "configured values")
+	}
+	if meta.NoPositions {
+		left = append(left, "file references")
+	}
+	if len(left) > 0 {
+		what += "; left out: " + strings.Join(left, ", ")
+	}
+	size := fmt.Sprintf("%.1f MB", float64(st.Size())/(1<<20))
+	if st.Size() < 1<<20 {
+		size = fmt.Sprintf("%d KB", (st.Size()+1023)/1024)
+	}
+	logf("bundle: %s (%s, %s): %s", out, compression, size, what)
+	return nil
+}
+
+// readRun reads the manifests of a run directory or a bundle.
+func readRun(path string) ([]*model.Manifest, error) {
+	r, err := bundle.Load(path, "")
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no manifests in %s (want <dir>/<service>/manifest.json)", dir)
-	}
-	return manifest.ReadAll(paths)
+	return r.Manifests, nil
 }
 
 // repoRules returns the rule files that apply to one repository only: its own
@@ -1260,4 +1355,12 @@ func writeTexts(dir string, formats map[string]bool, names map[string]string, ge
 
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "codegraph: "+format+"\n", args...)
+}
+
+// count writes n with the singular or plural noun.
+func count(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
