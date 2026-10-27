@@ -15,6 +15,7 @@ import (
 
 // Input bundles the outputs of the analysis stages for one service.
 type Input struct {
+	Codegraph  string // the codegraph version analysing it
 	Service    string
 	Aliases    []string
 	Tags       map[string]string
@@ -33,6 +34,7 @@ type Input struct {
 // Build assembles a manifest.
 func Build(in Input) *model.Manifest {
 	m := &model.Manifest{
+		Codegraph: in.Codegraph,
 		Service:   in.Service,
 		Aliases:   dedupe(in.Aliases),
 		Tags:      in.Tags,
