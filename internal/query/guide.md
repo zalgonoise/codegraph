@@ -133,7 +133,9 @@ codegraph query -run $R [-json] [-depth N] [-diagram] <command> [args]
   `#/j/<service>/<transport>/<key>` and `#/k/<transport>/<key>`, with each part URL-encoded.
 - `_system/system.md`: links, unmatched endpoints, and journeys across services as sequence diagrams.
 - `<service>/report.md`: one service's components, endpoints and journeys.
-- `kbcheck.json`: when `make graph` made the run, the comparison with the architecture knowledge base.
-- `diff.md`: when `make graph` made the run and there was a previous one, what changed since.
+- The outputs of a profile's checks (such as `kbcheck.json`, a comparison with an architecture knowledge base), when
+  its graph ran them (`codegraph run graph`, or `make graph`).
+- `diff.md`: when `codegraph run graph` made the run and there was a previous one, what changed since.
+- `fleet.json`: the repositories analysed, the commit of each, and which were reused from the run before.
 - `deploy/deploy.md`: when `make graph` read the environment's chart, what it runs: workloads matched to services,
   services not deployed, other repositories' workloads, mocks switched on, and public routes.

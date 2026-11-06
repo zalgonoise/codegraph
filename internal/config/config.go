@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/zalgonoise/codegraph/internal/options"
 )
 
 // Analyze configures `codegraph analyze`.
@@ -58,7 +60,9 @@ type Link struct {
 
 // Query configures `codegraph query`.
 type Query struct {
-	Run       string
+	Run       string // "" for the configuration's (pipeline.QueryRun)
+	Config    string // the configuration file ("" to find it, none for none)
+	Profile   string // a profile, whose run (its out) is read
 	JSON      bool
 	Depth     int
 	Diagram   bool
@@ -71,7 +75,9 @@ type Query struct {
 func ParseQuery(args []string, commands string) (*Query, error) {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	c := &Query{}
-	fs.StringVar(&c.Run, "run", "tmp/graph", "run directory: <dir>/<service>/manifest.json, as make graph writes it")
+	fs.StringVar(&c.Run, "run", "", runUsage)
+	fs.StringVar(&c.Config, "config", "", configUsage)
+	fs.StringVar(&c.Profile, "profile", "", "a profile (a directory, or a name of the configuration file's profiles): its run is read")
 	fs.BoolVar(&c.JSON, "json", false, "answer in JSON instead of Markdown")
 	fs.IntVar(&c.Depth, "depth", 2, "journey: how many services beyond its own to follow (0: its own calls only)")
 	fs.BoolVar(&c.Diagram, "diagram", false, "add a Mermaid diagram (service, journey, who, path, impact); JSON answers become {answer, diagram, explorer}")
@@ -90,7 +96,7 @@ func ParseQuery(args []string, commands string) (*Query, error) {
 			rest = append(rest, args[i])
 		case name == "json" || name == "diagram" || name == "h" || name == "help":
 			flags = append(flags, args[i])
-		case (name == "run" || name == "depth" || name == "explorer" || name == "inventory") && !hasValue && i+1 < len(args):
+		case (name == "run" || name == "depth" || name == "explorer" || name == "inventory" || name == "config" || name == "profile") && !hasValue && i+1 < len(args):
 			flags = append(flags, args[i], args[i+1])
 			i++
 		default:
@@ -127,7 +133,7 @@ func ParseInventory(args []string) (*Inventory, error) {
 	fs.StringVar(&c.Root, "root", "", "directory holding every repository (<repo>.git or <repo>)")
 	fs.StringVar(&c.Out, "out", "tmp/inventory", "output directory: inventory.json, inventory.md, contracts.md, and the frontier with -focus")
 	catalogues := fs.String("catalogues", "", "comma-separated repositories whose proto/ tree defines the gRPC contracts (contracts.md); the profile's when not given, and none when given empty")
-	fs.StringVar(&c.Profile, "profile", "", "the organisation's profile directory, whose profile.json gives its naming conventions and catalogues (default $CODEGRAPH_PROFILE)")
+	fs.StringVar(&c.Profile, "profile", "", "the organisation's profile directory, whose profile.yaml gives its naming conventions and catalogues (default $CODEGRAPH_PROFILE)")
 	fs.StringVar(&c.Focus, "focus", "", "file listing the repositories analysed in full (one name per line, # comments): the frontier is computed around them")
 	fs.StringVar(&c.Run, "run", "", "a run (make graph's): who serves and calls each contract (contracts.md); with -focus, it should include those repositories, and only their services give the frontier's hints: modules, served and missing contracts, one-sided topics")
 	fs.IntVar(&c.Rings, "rings", 1, "with -focus: frontier rings; ring n is the frontier around the focus and rings 1 to n-1 (its hints need a run that analysed them)")
@@ -199,8 +205,17 @@ func ParseBundle(args []string) (*Bundle, error) {
 // inventoryUsage describes -inventory, for query and mcp.
 const inventoryUsage = "the inventory image questions read (an inventory.json, or its directory); empty for the one next to the run, <run>/../inventory"
 
+// runUsage describes -run, for query and mcp.
+const runUsage = "the run to read: a run directory (<dir>/<service>/manifest.json, as codegraph run graph writes it) or a bundle; " +
+	"default -profile's run, else $CODEGRAPH_PROFILE's, else the configuration file's query.run, else its profile's, else tmp/graph"
+
+// configUsage describes -config.
+const configUsage = "the configuration file; default $CODEGRAPH_CONFIG, else .codegraph.yaml in the current directory, else in the home directory; none for none"
+
 // MCP configures `codegraph mcp`.
 type MCP struct {
+	Config    string
+	Profile   string
 	Run       string
 	Explorer  string // the explorer page answers link to ("" for the run's own, "none" for none)
 	Inventory string // the inventory image questions read ("" for <run>/../inventory)
@@ -210,11 +225,13 @@ type MCP struct {
 func ParseMCP(args []string) (*MCP, error) {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	c := &MCP{}
-	fs.StringVar(&c.Run, "run", "tmp/graph", "run directory to answer from: <dir>/<service>/manifest.json, as make graph writes it")
+	fs.StringVar(&c.Run, "run", "", runUsage)
+	fs.StringVar(&c.Config, "config", "", configUsage)
+	fs.StringVar(&c.Profile, "profile", "", "a profile (a directory, or a name of the configuration file's profiles): its run is read")
 	fs.StringVar(&c.Explorer, "explorer", "", explorerUsage)
 	fs.StringVar(&c.Inventory, "inventory", "", inventoryUsage)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: codegraph mcp [-run dir] [-explorer url|none]   (an MCP server on stdin and stdout, for Claude Code and Claude Desktop)")
+		fmt.Fprintln(fs.Output(), "usage: codegraph mcp [-run dir|bundle] [-explorer url|none]   (an MCP server on stdin and stdout, for Claude Code and Claude Desktop)")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -335,6 +352,7 @@ type Fleet struct {
 	Declared  string   // directory of services described by hand, <service>.json
 	Libraries bool     // analyse repositories without a main as libraries instead of skipping them
 	API       bool     // also analyse the API of repositories with mains, as <name>-api (implies Libraries)
+	Reuse     string   // a previous run whose analysis of the repositories unchanged since is reused
 }
 
 // DefaultSkipMains matches main packages that are tools or demos rather than services.
@@ -352,6 +370,7 @@ func ParseFleet(args []string) (*Fleet, error) {
 	fs.StringVar(&f.Declared, "declared", "", "directory of services described by hand, <service>.json (services codegraph cannot analyse, e.g. Python ones), linked with the analysed ones")
 	fs.BoolVar(&f.Libraries, "libraries", false, "analyse repositories without a main as libraries (one journey per exported symbol, never linked) instead of skipping them")
 	fs.BoolVar(&f.API, "api", false, "analyse every repository's API: those with mains also as a library named <name>-api, those without as libraries (implies -libraries)")
+	fs.StringVar(&f.Reuse, "reuse", "", "a previous run (its fleet.json): the repositories unchanged since (the same commit, codegraph, Go and settings) have their services copied from it instead of analysed again")
 	finish := analysisFlags(fs, c, "")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: codegraph fleet [flags] repo-dir...")
@@ -511,4 +530,95 @@ func (m kvFlag) Set(v string) error {
 	}
 	m[k] = val
 	return nil
+}
+
+// Run configures codegraph run, config, check and status: the configuration
+// file and profile, and options over theirs.
+type Run struct {
+	Command  string
+	Config   string // the configuration file ("" to find it, none for none)
+	Profile  string // a profile: a directory, or a name of the configuration file's profiles
+	Pipeline string // config, check, status: the pipeline whose settings to use
+	Names    []string
+	DryRun   bool
+	Get      string          // config: print one setting
+	Options  options.Options // the command line's, paths absolute
+}
+
+// ParseRun parses the flags of codegraph run (pipelines or steps as
+// arguments, flags before or after them), config, check and status.
+func ParseRun(cmd string, args []string) (*Run, error) {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	c := &Run{Command: cmd}
+	fs.StringVar(&c.Config, "config", "", configUsage)
+	fs.StringVar(&c.Profile, "profile", "", "a profile: a directory with a profile.yaml, or a name of the configuration file's profiles; default the pipeline's, else $CODEGRAPH_PROFILE, else the configuration file's profile")
+	switch cmd {
+	case "run":
+		fs.BoolVar(&c.DryRun, "dry-run", false, "print what would run, as a shell script, and run nothing")
+	case "config":
+		fs.StringVar(&c.Get, "get", "", "print one setting's value alone (an option's name, profile, config or pipelines)")
+		fallthrough
+	default:
+		fs.StringVar(&c.Pipeline, "pipeline", "", "the pipeline whose settings to use; default the configuration file's default pipeline; none for a step run by name (codegraph run graph, make graph)")
+	}
+	options.Register(fs, &c.Options)
+	fs.Usage = func() {
+		switch cmd {
+		case "run":
+			fmt.Fprintln(fs.Output(), "usage: codegraph run [flags] [pipeline|step ...]   (no name: the configuration file's default pipeline)\n\n"+
+				"steps: inventory, graph (fleet, then the deployment, the checks and the diff with the run before), deploy, checks, diff, bundle; org runs graph, inventory, graph\n\nflags:")
+		default:
+			fmt.Fprintf(fs.Output(), "usage: codegraph %s [flags]\n\nflags:\n", cmd)
+		}
+		fs.PrintDefaults()
+	}
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		if cmd != "run" {
+			return nil, fmt.Errorf("%s: unexpected arguments %v", cmd, fs.Args())
+		}
+		c.Names = append(c.Names, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if err := c.Options.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", cmd, err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	c.Options.Resolve(wd)
+	return c, nil
+}
+
+// Init configures codegraph init.
+type Init struct {
+	Out     string // the file to write
+	Profile string // a profile directory to name in it
+	Force   bool
+}
+
+// ParseInit parses codegraph init's flags.
+func ParseInit(args []string) (*Init, error) {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	c := &Init{}
+	fs.StringVar(&c.Out, "out", "", "the file to write; default ~/.codegraph.yaml")
+	fs.StringVar(&c.Profile, "profile", os.Getenv("CODEGRAPH_PROFILE"), "a profile directory for its pipeline (default $CODEGRAPH_PROFILE)")
+	fs.BoolVar(&c.Force, "force", false, "overwrite the file when it exists")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: codegraph init [-profile dir] [-out file] [-force]   (write a starting configuration file)")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if fs.NArg() > 0 {
+		return nil, fmt.Errorf("init: unexpected arguments %v", fs.Args())
+	}
+	return c, nil
 }

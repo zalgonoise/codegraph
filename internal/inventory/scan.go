@@ -36,7 +36,7 @@ type Inventory struct {
 	Contracts []Contract `json:"contracts,omitempty"` // the gRPC services the contracts catalogues define
 
 	// Conventions are the organisation's naming conventions (a profile's
-	// profile.json), which the report and the frontier rely on.
+	// profile.yaml), which the report and the frontier rely on.
 	Conventions Conventions `json:"-"`
 }
 

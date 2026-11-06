@@ -8,18 +8,28 @@ users.
 
 1. **Verify:** `make test` (`gofmt -l . && go vet ./... && go test ./...`). The golden test `cmd/codegraph/main_test.go`
    runs the seven samples (orders, inventory, ledger, billing, gateway, tool, pipeline), the library sample (mailer)
-   and the declared sample (`testdata/declared/notifier.json`); unit tests cover `internal/config`, `declared`, `deploy`,
-   `diff`, `inventory`, `library`, `link`, `mcpserver`, `model`, `profile`, `query`, `render`, `resolve`, `settings`
-   and `transport` (`deploy.TestRender` uses helm when installed). `make samples` writes the samples' run to `tmp/samples`.
+   and the declared sample (`testdata/declared/notifier.json`); `cmd/codegraph/pipeline_test.go` runs a configuration
+   file's pipeline over git clones of two samples, four times (reuse, a new commit, `-full`);
+   `cmd/codegraph/commands_test.go` checks the commands' names and short forms; unit tests cover
+   `internal/bundle`, `config`, `configfile`, `declared`, `deploy`, `diff`, `incremental`, `inventory`, `library`,
+   `link`, `mcpserver`, `model`, `options`, `pipeline`, `profile`, `query`, `render`, `resolve`, `settings` and
+   `transport` (`deploy.TestRender` uses helm when installed). `make samples` writes the samples' run to `tmp/samples`.
 2. **Organisations live in profiles.** Nothing here names an organisation: its rules, focus, services described by
-   hand, deployment chart, knowledge base check, naming conventions (`profile.json`) and its notes live in a profile
-   directory, kept in a repository of its own (README "Profiles"). `make <target> PROFILE=<dir>` (or a profile's own
-   Makefile) runs with it. `make audit` with a profile's denylist checks that no file here names the organisation.
-3. **Planned work** is in "Next" below, in order; continue from the first item not marked done. As of 2026-10-19
-   all of them are done; ask the user what comes next.
+   hand, deployment chart, checks, naming conventions and run defaults (`profile.yaml`) and its notes live in a profile
+   directory, kept in a repository of its own (README "Profiles"). `codegraph run <step> -profile <dir>`, `make
+   <target> PROFILE=<dir>` (or a profile's own Makefile) or a pipeline of `~/.codegraph.yaml` runs with it. `make
+   audit` with a profile's denylist checks that no file here names the organisation.
+3. **Planned work** is in "Next" below, in order; continue from the first item not marked done. As of 2026-11-05
+   every item is done but 10 (an HTTP MCP server, planned: settle its open points with the user first); ask the user
+   what comes next.
 4. **The analysed repositories are read-only.** Run with `GOFLAGS=-mod=readonly`; `make graph` checks every clone's
    `git status` before and after. Never write output into them; outputs go to `tmp/` (git-ignored) or a profile's
    `tmp/`.
+5. **Runs go through `codegraph run`.** The Makefile's run targets, a configuration file's pipelines and `codegraph`
+   alone all use the steps of `internal/pipeline`; change a step there, never in the Makefile. A person's
+   `~/.codegraph.yaml` can hold commands (exec steps) such as pulling every clone: never run a pipeline or
+   `codegraph` alone unless asked, and prefer `-dry-run` (or `codegraph config`, `check`, `status`) to see what one
+   would do. Tests set `CODEGRAPH_CONFIG=none` (`TestMain`) so nobody's own file leaks into them.
 
 ## Commands
 
@@ -31,6 +41,12 @@ make docker-test  # the same tests in the toolchain image (Dockerfile); make doc
 make release VERSION=v1.2.0  # bin/codegraph-<version>-<os>-<arch> for darwin and linux, amd64 and arm64, and SHA256SUMS
 make bundle     # pack the last run into $(OUT).tar.gz (BUNDLE, BUNDLE_FLAGS=-no-settings -no-positions)
 make help       # every target; make graph, inventory, deploy, query, diff and audit take PROFILE=<dir>
+make config     # codegraph config: every setting resolved (built-in, profile, pipeline, step, command line) and its source
+
+# runs: what make graph, inventory, … do (codegraph run <step>), and the configuration file's pipelines
+go run ./cmd/codegraph run graph -root ~/src -dry-run   # print the steps as a shell script, run nothing
+go run ./cmd/codegraph run -config ~/.codegraph.yaml    # its default pipeline; codegraph alone does it from a terminal
+go run ./cmd/codegraph check; go run ./cmd/codegraph status; go run ./cmd/codegraph init -out /tmp/x.yaml
 
 # the samples by hand
 go run ./cmd/codegraph analyze -dir testdata/orders -rules testdata/orders/codegraph-rules.json -out /tmp/samples
@@ -68,11 +84,12 @@ config → loader → program (SSA) → reach (CHA/RTA/VTA)
        → resolve → transport | entrypoint | components | directives
        → journeys → manifest → render                 (codegraph analyze)
 manifest.ReadAll → link (+ journey chains) → render   (codegraph link)
+configfile + profile → options (layers) → pipeline → fleet (+ incremental) | inventory | deploy | diff | bundle   (codegraph run)
 ```
 
 | Package | Responsibility |
 |---|---|
-| `internal/config` | Flags for every command: `analyze`, `link`, `fleet`, `diff`, `query`, `mcp`, `inventory` and `deploy`. For `analyze` and `fleet` (shared analysis flags in `analysisFlags`): `-dir -entry -algo -out -format -service -alias -tag -rules -no-default-rules -entry-depth -resolve-depth -journeys -journey-depth -tests -libs -std -build-tags`, plus `fleet`'s repo arguments and `-skip-mains` |
+| `internal/config` | Flags for every command: `analyze`, `link`, `fleet`, `diff`, `query`, `mcp`, `inventory`, `deploy`, `bundle`, `run`, `config`, `check`, `status` and `init` (`ParseRun`: names and flags in any order, the options' flags from `options.Register`, their paths made absolute). For `analyze` and `fleet` (shared analysis flags in `analysisFlags`): `-dir -entry -algo -out -format -service -alias -tag -rules -no-default-rules -entry-depth -resolve-depth -journeys -journey-depth -tests -libs -std -build-tags`, plus `fleet`'s repo arguments and `-skip-mains` |
 | `internal/loader` | `packages.Load` with full syntax and types. Records `ModulePkgs` (packages with `Module.Main`, plus packages of modules matching `-include-modules`) and `PkgModule` (`"std"` for the standard library). Fails on package errors, because SSA needs well-typed code |
 | `internal/program` | `ssautil.AllPackages(..., ssa.InstantiateGenerics)`, `prog.Build()`, `ssautil.MainPackages` sorted by path (none needed with `-library`), and every built package (`Packages`) |
 | `internal/reach` | Roots are `main.init` and `main.main` (`Analyze`), or any functions (`AnalyzeRoots`: a library's API). CHA uses a whole-program graph plus forward BFS. RTA is `rta.Analyze(roots, true)` and also gives `RuntimeTypes`. VTA is `vta.CallGraph(rtaReachable, rta.CallGraph)` plus forward BFS. The result then goes through `DeleteSyntheticNodes()`. Provides `Callers(fn)` and `Callees(site)` |
@@ -99,8 +116,12 @@ manifest.ReadAll → link (+ journey chains) → render   (codegraph link)
 | `internal/bundle` | `codegraph bundle`: `Write` packs a run (manifests, deployment, inventory, a freshly drawn explorer, `bundle.json` metadata) into a tar compressed with gzip or zstd (`klauspost/compress`), applying `NoSettings` and `NoPositions`; `Read`/`ReadFrom` read one back (told by its magic bytes); `Load` reads a run directory or a bundle, which every command reading a run uses (`query.Load`, `readRun`); `ExplorerPage` writes a bundle's page to the user's cache |
 | `internal/diff` | `codegraph diff`: compares two runs (links both): links, services, endpoint signatures per service, unanswered topics; Markdown report, `-fail-on-links` for CI |
 | `Dockerfile`, `.dockerignore` | The toolchain image (Go, pkg-config + libxml2, python3, make; `CODEGRAPH=codegraph` prebuilt) for `make docker-*` |
-| `Makefile` | `make graph` (fleet, then with a profile the deployment and the knowledge base check, and the diff with the previous run; clones checked unchanged), `inventory`, `diff`, `open`, `samples`, `test`, `audit`, …; a profile's `profile.mk` sets its variables |
-| `internal/profile` | An organisation's profile: `Load` reads `<dir>/profile.json` (`-profile`, or `$CODEGRAPH_PROFILE`) into `inventory.Conventions` and the contracts catalogues |
+| `Makefile` | The run targets are `codegraph run <step>` (`graph`, `org`, `inventory`, `deploy`, `checks`, `diff`, `bundle`), with `RUN_FLAGS` built from the variables given to make (`$(origin)` command line or environment); `config`, `check`, `status`; `query`, `open`, `clean`, `audit`, `docker-graph` and `mcp-desktop` read settings with `codegraph config -pipeline none -get` (a step's settings: the default pipeline of the person's configuration file would point `clean` at another run). Then `samples`, `test`, `cover`, `release`, `mcp-build` and the `docker-*` targets |
+| `internal/profile` | An organisation's profile: `Load` reads `<dir>/profile.yaml` (`-profile`, or `$CODEGRAPH_PROFILE`; `profile.json`, its conventions only, when there is none) into `inventory.Conventions`, the contracts catalogues and `Defaults` (an `options.Options`, paths relative to the profile) |
+| `internal/options` | The settings of runs (`Options`, every field a pointer: unset is nil), merged in layers with their sources (`Merge`), paths resolved against the file setting them (`Resolve`), `{root}` and `{out}` expanded once merged (`Expand`), flags in kebab case (`Register`); `DecodeYAML`: YAML through the json names, unknown keys as warnings with a suggestion (`CheckKeys`, `Suggest`) |
+| `internal/configfile` | `.codegraph.yaml`: `Find` (-config, `$CODEGRAPH_CONFIG`, the current directory, the home directory), `Read` (profiles, `profile`, `default`, `query`, `pipelines` of `Step`s), trust (`Trusted`: not from the current directory), `Template` for `codegraph init` |
+| `internal/pipeline` | `codegraph run`: `Resolve` (a pipeline or a built-in step, its profile, its option layers, its trust), `Runner` (the steps through `Dispatch`, codegraph's own command dispatch, so `-dry-run` prints them as commands; the summary), `Repositories`, `QueryRun` (the run query and mcp read without `-run`); `Describe`, `Get`, `Check` and `Status` for `config`, `check` and `status` |
+| `internal/incremental` | `fleet -reuse`: `Toolchain` (the executable's SHA-256 and `go env`), `Key` (the git tree of the repository's directory, settings, rule files; none with uncommitted changes, outside git, or a local `replace`), `Record` (`fleet.json`: each repository's commit, key and services, and the link's counts), `Copy` |
 | `testdata/stubs/*` | Offline stand-ins for grpc, grpc-gateway's runtime (`gateway`), gorm (+ mysql driver), chi, iris, cobra, zalgonoise/x/cli v2 (`xcli`), kelseyhightower/envconfig, and in-house style libraries (`kafkabus` for Kafka, `rabbitbus` for RabbitMQ, `kvcache` for Redis) and a `*-sdk-go`, wired into the samples with `replace` |
 | `testdata/rules/inhouse.json` | Rules for the in-house style stubs: what an organisation's profile holds for its own libraries |
 
@@ -236,6 +257,40 @@ journey that reaches another service (a summary and the first steps above `maxSe
   the manifests' versions in `AnalysedBy`), and reported by `codegraph version` and the MCP server. The Makefile's
   `VERSION` (`git describe --tags --always --dirty`, computed once) feeds `CODEGRAPH` (`go run -ldflags`),
   `mcp-build`, `release` and the Docker image (`--build-arg VERSION`).
+- **Commands** (`commands()` in `cmd/codegraph/main.go`, 2026-11-06): each command answers to its name and a
+  one-letter short form, its first letter, in upper case for the second command of a letter (`D` deploy, `C` check,
+  `I` init). `dispatch` looks either up and runs the command by its name, so `runReport`, the flag sets and their help
+  only ever see names (passing the typed word on made `c` run status and `-config -get` fail). Commands take no
+  dashes, as `-config`, `-run`, `-inventory` and `-bundle` are flags, except the customary `-h`/`-help`/`--help` and
+  `-v`/`-version`/`--version`; an unknown command says so (a dashed name: no dashes, flags after the command), or
+  suggests a near name. `TestCommandNames` keeps the forms unique and listed in the usage.
+- **Configuration file and pipelines** (`internal/configfile`, `internal/pipeline`, 2026-11-05): `codegraph run`
+  runs a pipeline of `.codegraph.yaml` or a built-in step; the Makefile's run targets are those steps, so make and
+  pipelines never diverge. Layers: built-in (`options.Defaults`), the profile's `defaults`, the pipeline's, the step's,
+  the command line's; paths relative to the file setting them, `{root}`/`{out}` expanded after merging (a profile's
+  chart under `{root}` follows a root given on the command line). The profile: `-profile` (a name of `profiles`, else
+  a directory), else the pipeline's, else `$CODEGRAPH_PROFILE`, else the file's `profile`. query and mcp without
+  `-run`: `-profile`'s out, else `$CODEGRAPH_PROFILE`'s, else `query.run`, else the file's profile's out, else
+  `tmp/graph`. **Trust:** exec steps and checks (shell commands, `sh -c`) run only when the file came from `-config`,
+  `$CODEGRAPH_CONFIG` or the home directory, and the profile from those, `-profile` or `$CODEGRAPH_PROFILE`; a file
+  of the current directory (a cloned repository could carry one) is refused before any step runs. **Unknown keys**
+  warn with file:line and a suggestion; wrong types, unknown steps, reserved pipeline names (the steps', `org`) and a
+  newer `version` fail. `codegraph` alone runs the default pipeline only when stdin is a terminal (an MCP client
+  without args gets the usage, as before). `config`, `check` and `status` describe the default pipeline unless
+  `-pipeline` names another, or `none` for a step run by name; make's targets always pass `-pipeline none`. The graph step does what make graph did: select the repositories
+  (`repos` names or paths, else focus plus `<inventory>/frontier.txt`, else every directory of root with a go.mod;
+  a name is `<name>.git`, else `<name>`), move the previous run to `<out>.prev`, fleet (`GOFLAGS=-mod=readonly`,
+  `GOPRIVATE`, `-reuse`), compare every clone's `git status`, then deploy (with helm and the chart), the checks (their
+  stdout into the run), and the diff with `<out>.prev`. Checked against the old Makefile on a 38- and a 178-repository
+  profile: the same fleet flags and repositories in the same order, plus `-reuse`.
+- **Incremental runs** (`internal/incremental`, `fleet -reuse`, 2026-11-05): a repository's key hashes the toolchain
+  (the executable's SHA-256: a development build changes with its code while its version does not; `go env GOVERSION
+  GOOS GOARCH GOFLAGS CGO_ENABLED GOEXPERIMENT`), the git tree of its directory (`rev-parse HEAD:./`), every analysis
+  setting (`fleetSettings`: `config.Analyze` without Dir and Out, entries, libraries, api) and the rule files' contents.
+  No key, so always analysed: uncommitted or untracked changes in it, not a git clone, a `replace` to a local
+  directory (reads files outside the tree), a failed analysis. A repository whose key equals the one in `<reuse>/
+  fleet.json` has its service directories copied; declared services are written every time, and linking always runs.
+  On the 38-repository profile: 3m11s, then 7 s with every repository reused and the 61 manifests byte-identical.
 - **Container images** (`internal/inventory/images.go`, 2026-10-26): `Repo.Images` are the images a repository
   builds, `Repo.References` those its files use without building (minus its own). Shell lines of CI files
   (`ciFiles`: Bitbucket, GitLab, GitHub workflows, CircleCI, Azure, Cloud Build, Jenkinsfiles, Makefiles, `*.mk`,
@@ -565,6 +620,17 @@ route; settings with only gRPC and OTel library variables; ports `:*`.
     Claude Desktop goes through connectors, whose reachability needs checking for an internal-only server). Bundles
     stay the offline way to share.
 
+11. **Done (2026-11-05): a configuration file, pipelines and incremental runs.** See Conventions ("Configuration file
+    and pipelines", "Incremental runs"). Asked: one `~/.codegraph.yaml` (or the current directory's, or `-config`)
+    naming the commands to run and the profiles, `codegraph` alone running the daily routine; unknown keys as warnings;
+    exec only from a trusted file; one `profile.yaml` per profile (`profile.mk` and `profile.json` merged); the
+    Makefile calling `codegraph run`; plus `config`, `check`, `status`, `init`, `-dry-run`, the run's summary and
+    incremental runs. Tests: `options`, `configfile`, `incremental`, `pipeline`, `config.TestParseRun`,
+    `profile.TestLoad`, and `TestPipeline` (exec, inventory, graph with a check, bundle; reuse, a new commit, `-full`,
+    status, check, config, a refused untrusted file, init). Found while documenting it: make's targets read settings
+    with `config -get`, which resolved the configuration file's default pipeline, so `make clean` would have removed
+    that pipeline's run; they pass `-pipeline none` now (a step's settings, like the run targets).
+
 For each item: a sample in `testdata` and the golden test, the check on authz (or a real library for item 5),
 README and this file updated, `make test`, `make samples` and `make audit` (with a profile's denylist) passing.
 
@@ -746,12 +812,13 @@ both; settings `DB_HOST`, `SMTP_HOST`.
 - Check that a feature is used in the code it is meant for before building it; park unused ones, with the evidence.
 - Each responsibility stays in its own package, wired in `cmd/codegraph/main.go`.
 - Run build, vet, gofmt, `go test ./...` and the samples after each change, and keep `make cover` at 70% or more
-  (85.5% on 2026-10-22; every package above 70% under that measure, `cmd/codegraph` lowest at 72%: `TestCommands`
-  runs `query`, `inventory` and `deploy` end to end). Report honestly what was verified and what wasn't.
+  (85.1% on 2026-11-05; 85.5% on 2026-10-22, when every package was above 70% under that measure, `cmd/codegraph`
+  lowest at 72%: `TestCommands` runs `query`, `inventory` and `deploy` end to end). Report honestly what was verified and what wasn't.
 - The README is for users: what codegraph does, "How it works", then "Getting started, step by step" and "Running
   with Docker" before the reference sections. When a command or flag changes, update those first. `make docker-test`
   and `make docker-graph` (and the direct `docker run` example) were checked on 2026-10-22; check them again when the
-  Dockerfile or the docker targets change.
+  Dockerfile or the docker targets change. `docker-graph` changed on 2026-11-05 (it runs `codegraph run graph` in the
+  image, the settings read with `config -get` on the host): only its command line was checked (`make -n`), not a run.
 - When changing rendering, check that the Mermaid output parses. One way: collect every mermaid block from the
   outputs into an HTML page that imports Mermaid 11 from jsdelivr and calls `mermaid.parse` on each. Serve it with a
   temporary `.claude/launch.json` (`python3 -m http.server`), open it in the browser pane, and remove the launch

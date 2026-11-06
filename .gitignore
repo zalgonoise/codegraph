@@ -5,5 +5,11 @@ bin/
 _system/
 # an organisation's profile kept inside this directory (see README "Profiles")
 /profile/
+.codegraph.yaml
+
 .idea/
 .DS_Store
+
+# Bundles (codegraph bundle): runs of private code, never committed
+*.tar.gz
+*.tar.zst

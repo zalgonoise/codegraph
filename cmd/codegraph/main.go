@@ -10,6 +10,14 @@
 //	codegraph inventory  scan every repository cheaply (languages, go.mod, imports, container
 //	                     images); suggest which to analyse in full
 //	codegraph deploy     read what an environment runs from its Helm chart, matched to the run
+//	codegraph bundle     pack a run into one file to share
+//	codegraph run        run a pipeline of the configuration file (.codegraph.yaml), or one
+//	                     step: inventory, graph, deploy, checks, diff, bundle; codegraph
+//	                     alone runs the default pipeline
+//	codegraph config     show the settings a run resolves (configuration, profile, flags)
+//	codegraph check      check the tools, files and repositories a run needs
+//	codegraph status     tell how current the last run is
+//	codegraph init       write a starting configuration file
 //
 // Pipeline (each stage is its own package, wired here):
 //
@@ -38,6 +46,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,11 +55,13 @@ import (
 	"github.com/zalgonoise/codegraph/internal/bundle"
 	"github.com/zalgonoise/codegraph/internal/components"
 	"github.com/zalgonoise/codegraph/internal/config"
+	"github.com/zalgonoise/codegraph/internal/configfile"
 	"github.com/zalgonoise/codegraph/internal/declared"
 	"github.com/zalgonoise/codegraph/internal/deploy"
 	"github.com/zalgonoise/codegraph/internal/diff"
 	"github.com/zalgonoise/codegraph/internal/directives"
 	"github.com/zalgonoise/codegraph/internal/entrypoint"
+	"github.com/zalgonoise/codegraph/internal/incremental"
 	"github.com/zalgonoise/codegraph/internal/inventory"
 	"github.com/zalgonoise/codegraph/internal/journeys"
 	"github.com/zalgonoise/codegraph/internal/library"
@@ -59,6 +70,8 @@ import (
 	"github.com/zalgonoise/codegraph/internal/manifest"
 	"github.com/zalgonoise/codegraph/internal/mcpserver"
 	"github.com/zalgonoise/codegraph/internal/model"
+	"github.com/zalgonoise/codegraph/internal/options"
+	"github.com/zalgonoise/codegraph/internal/pipeline"
 	"github.com/zalgonoise/codegraph/internal/profile"
 	"github.com/zalgonoise/codegraph/internal/program"
 	"github.com/zalgonoise/codegraph/internal/query"
@@ -73,66 +86,288 @@ import (
 const usage = `codegraph: static architecture analysis for Go services
 
 Usage:
+  codegraph                                 run the configuration file's default pipeline (.codegraph.yaml)
+  codegraph run [pipeline|step ...]         run pipelines, or steps: inventory, graph, deploy, checks, diff, bundle (-dry-run: print them)
+  codegraph config [-pipeline name]         show every setting a run resolves, and where it comes from
+  codegraph check [-pipeline name]          check the tools, files and repositories a run needs
+  codegraph status [-pipeline name]         tell how current the last run is, and which repositories moved since
+  codegraph init [-profile dir]             write a starting configuration file (~/.codegraph.yaml)
   codegraph analyze [flags]                 analyse a repository (one manifest per main package)
   codegraph link [flags] manifest.json...   connect service manifests into a system view
   codegraph fleet [flags] repo-dir...       analyse several repositories, then link them
   codegraph diff -base dir -head dir        compare two runs (architecture changes, as Markdown)
-  codegraph query [-run dir] <command>      answer questions about a run ("codegraph query -h" lists them)
+  codegraph query [-run dir] <command>      answer questions about a run or a bundle ("codegraph query -h" lists them)
   codegraph mcp [-run dir]                  serve those answers over MCP (stdin and stdout)
   codegraph inventory -root dir [-focus f [-run dir] [-rings n]]  scan every repository cheaply; suggest which to analyse in full
   codegraph deploy -chart dir [-inventory f] [-run dir]  what an environment runs (helm template, offline), matched to services
   codegraph bundle [-run dir] [-out file]  pack a run into one file to share (gzip or zstd); query, mcp and diff read it with -run
   codegraph version                         print the version
 
+Short forms: r run, c config, C check, s status, I init, a analyze, l link, f fleet, d diff, q query, m mcp,
+i inventory, D deploy, b bundle, v version, h help (codegraph c -get out is codegraph config -get out).
+
 Run "codegraph <command> -h" for a command's flags (query -h also lists the questions).
 `
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice == 0 {
-			// Not a terminal: most likely an MCP client configured without arguments.
-			fmt.Fprintln(os.Stderr, `codegraph: no command given. An MCP client must pass one: "args": ["mcp", "-run", "<absolute path of the run, such as …/codegraph/tmp/graph>"] (make mcp-desktop prints the entry).`)
-		}
+	args := os.Args[1:]
+	if len(args) == 0 {
+		args = noCommand()
+	}
+	err := dispatch(args)
+	var unknown errUnknownCommand
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+	case errors.As(err, &unknown):
+		fmt.Fprintf(os.Stderr, "codegraph: %v\n\n%s", unknown, usage)
 		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "analyze":
-		err = runAnalyze(os.Args[2:])
-	case "link":
-		err = runLink(os.Args[2:])
-	case "fleet":
-		err = runFleet(os.Args[2:])
-	case "diff":
-		err = runDiff(os.Args[2:])
-	case "query":
-		err = runQuery(os.Args[2:])
-	case "mcp":
-		err = runMCP(os.Args[2:])
-	case "inventory":
-		err = runInventory(os.Args[2:])
-	case "deploy":
-		err = runDeploy(os.Args[2:])
-	case "bundle":
-		err = runBundle(os.Args[2:])
-	case "version", "-version", "--version":
-		fmt.Println("codegraph", buildVersion())
-		return
-	case "help", "-h", "-help", "--help":
-		fmt.Print(usage)
-		return
-	default:
-		fmt.Fprintf(os.Stderr, "codegraph: unknown command %q\n\n%s", os.Args[1], usage)
-		os.Exit(2)
-	}
-	if errors.Is(err, flag.ErrHelp) {
-		return
-	}
-	if err != nil {
+	case err != nil:
 		fmt.Fprintln(os.Stderr, "codegraph:", err)
 		os.Exit(1)
 	}
+}
+
+// noCommand is what codegraph alone does: from a terminal, run the
+// configuration file's default pipeline; otherwise (an MCP client configured
+// without arguments, most likely, which must never start a run) print the
+// usage, saying which arguments such a client must pass.
+func noCommand() []string {
+	if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
+		cf, err := configfile.Find("")
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "codegraph:", err)
+			os.Exit(1)
+		case cf != nil && cf.Default != "":
+			return []string{"run"}
+		case cf != nil:
+			fmt.Fprint(os.Stderr, usage)
+			fmt.Fprintf(os.Stderr, "\ncodegraph: %s names no default pipeline: set default to one of its pipelines (%s) to run it with codegraph alone.\n",
+				cf.Path, strings.Join(cf.Names(), ", "))
+			os.Exit(2)
+		}
+		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprintln(os.Stderr, "\ncodegraph: codegraph init writes a configuration file whose default pipeline codegraph alone then runs.")
+		os.Exit(2)
+	}
+	fmt.Fprint(os.Stderr, usage)
+	fmt.Fprintln(os.Stderr, `codegraph: no command given. An MCP client must pass one: "args": ["mcp", "-run", "<absolute path of the run, such as …/codegraph/tmp/graph>"] (make mcp-desktop prints the entry).`)
+	os.Exit(2)
+	return nil
+}
+
+// errUnknownCommand is a command codegraph does not have.
+type errUnknownCommand string
+
+func (e errUnknownCommand) Error() string {
+	s := string(e)
+	switch name := strings.TrimLeft(s, "-"); {
+	case name != s && name != "":
+		if c, ok := lookup(name); ok {
+			return fmt.Sprintf("unknown command %q: commands take no dashes (codegraph %s), and flags go after the command", s, c.name)
+		}
+		return fmt.Sprintf("unknown command %q: flags go after the command (codegraph <command> %s)", s, s)
+	default:
+		if n := options.Suggest(s, commandNames()); n != "" && len(s) > 1 {
+			return fmt.Sprintf("unknown command %q (did you mean %s?)", s, n)
+		}
+	}
+	return fmt.Sprintf("unknown command %q", s)
+}
+
+// command is one of codegraph's commands, with its one-letter short form.
+type command struct {
+	name, short string
+	run         func(args []string) error
+}
+
+// commands lists codegraph's commands. A short form is the name's first
+// letter, in upper case for the second command of that letter (deploy, check,
+// init). Commands take no dashes: -config, -run and -inventory are flags.
+func commands() []command {
+	report := func(name string) func([]string) error {
+		return func(args []string) error { return runReport(name, args) }
+	}
+	return []command{
+		{"analyze", "a", runAnalyze},
+		{"link", "l", runLink},
+		{"fleet", "f", runFleet},
+		{"diff", "d", runDiff},
+		{"query", "q", runQuery},
+		{"mcp", "m", runMCP},
+		{"inventory", "i", runInventory},
+		{"deploy", "D", runDeploy},
+		{"bundle", "b", runBundle},
+		{"run", "r", runRun},
+		{"config", "c", report("config")},
+		{"check", "C", report("check")},
+		{"status", "s", report("status")},
+		{"init", "I", runInit},
+		{"version", "v", func([]string) error { fmt.Println("codegraph", buildVersion()); return nil }},
+		{"help", "h", func([]string) error { fmt.Print(usage); return nil }},
+	}
+}
+
+func commandNames() []string {
+	var names []string
+	for _, c := range commands() {
+		names = append(names, c.name)
+	}
+	return names
+}
+
+// lookup finds a command by its name or short form; -h, -help and --help are
+// help, and -v, -version and --version the version, as is customary.
+func lookup(arg string) (command, bool) {
+	switch arg {
+	case "-h", "-help", "--help":
+		arg = "help"
+	case "-v", "-version", "--version":
+		arg = "version"
+	}
+	for _, c := range commands() {
+		if arg == c.name || arg == c.short {
+			return c, true
+		}
+	}
+	return command{}, false
+}
+
+// dispatch runs one command; codegraph run's steps go through it too.
+func dispatch(args []string) error {
+	c, ok := lookup(args[0])
+	if !ok {
+		return errUnknownCommand(args[0])
+	}
+	return c.run(args[1:])
+}
+
+// ---- run, config, check, status, init -----------------------------------------
+
+// runRun runs pipelines of the configuration file, or steps by name; none
+// named, the file's default pipeline.
+func runRun(args []string) error {
+	cfg, err := config.ParseRun("run", args)
+	if err != nil {
+		return err
+	}
+	cf, err := configfile.Find(cfg.Config)
+	if err != nil {
+		return err
+	}
+	names := cfg.Names
+	if len(names) == 0 {
+		if cf == nil || cf.Default == "" {
+			return errors.New("run: name a pipeline or a step (inventory, graph, deploy, checks, diff, bundle, org), or set a configuration file's default pipeline (codegraph init)")
+		}
+		names = []string{cf.Default}
+	}
+	warned := map[string]bool{}
+	for _, name := range names {
+		plan, err := pipeline.Resolve(pipeline.Request{Config: cf, Profile: cfg.Profile, Name: name, Flags: cfg.Options})
+		if err != nil {
+			return err
+		}
+		for _, w := range plan.Warnings {
+			if !warned[w] {
+				warned[w] = true
+				logf("warning: %s", w)
+			}
+		}
+		r := &pipeline.Runner{Dispatch: dispatch, DryRun: cfg.DryRun, Log: logf}
+		if _, err := r.Run(plan); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runReport shows the settings a run resolves (config), checks them (check),
+// or tells how current the run is (status).
+func runReport(cmd string, args []string) error {
+	cfg, err := config.ParseRun(cmd, args)
+	if err != nil {
+		return err
+	}
+	cf, err := configfile.Find(cfg.Config)
+	if err != nil {
+		return err
+	}
+	name := cfg.Pipeline
+	switch {
+	case name == options.None: // the settings of a step run by name, as make's targets run them
+		name = ""
+	case name == "" && cf != nil && cf.Pipelines[cf.Default] != nil:
+		name = cf.Default
+	}
+	plan, err := pipeline.Resolve(pipeline.Request{Config: cf, Profile: cfg.Profile, Name: name, Flags: cfg.Options})
+	if err != nil {
+		return err
+	}
+	switch {
+	case cmd == "config" && cfg.Get != "":
+		v, err := pipeline.Get(plan, cfg.Get)
+		if err != nil {
+			return err
+		}
+		fmt.Println(v)
+		return nil
+	case cmd == "config":
+		for _, w := range plan.Warnings {
+			logf("warning: %s", w)
+		}
+		if err := pipeline.Describe(os.Stdout, plan); err != nil {
+			return err
+		}
+		run, from, err := pipeline.QueryRun(cf, cfg.Profile)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\nquery and mcp read %s (%s)\n", run, from)
+		return nil
+	case cmd == "check":
+		if !pipeline.Check(os.Stdout, plan) {
+			return errors.New("check: something above would make the run fail")
+		}
+		return nil
+	}
+	for _, w := range plan.Warnings {
+		logf("warning: %s", w)
+	}
+	return pipeline.Status(os.Stdout, plan)
+}
+
+// runInit writes a starting configuration file.
+func runInit(args []string) error {
+	cfg, err := config.ParseInit(args)
+	if err != nil {
+		return err
+	}
+	out := cfg.Out
+	if out == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		out = filepath.Join(home, configfile.Name)
+	}
+	if _, err := os.Stat(out); err == nil && !cfg.Force {
+		return fmt.Errorf("init: %s exists; -force overwrites it", out)
+	}
+	prof := ""
+	if cfg.Profile != "" {
+		if prof, err = filepath.Abs(cfg.Profile); err != nil {
+			return err
+		}
+		if _, err := profile.Load(prof); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(out, []byte(configfile.Template(prof)), 0o644); err != nil {
+		return err
+	}
+	logf("wrote %s: edit it, then codegraph config shows what it resolves to, codegraph check checks it, and codegraph runs its default pipeline", out)
+	return nil
 }
 
 // ---- analyze ------------------------------------------------------------------
@@ -491,19 +726,25 @@ func runLink(args []string) error {
 	if err != nil {
 		return err
 	}
+	_, err = linkRun(cfg)
+	return err
+}
+
+// linkRun links the manifests and writes the system's outputs.
+func linkRun(cfg *config.Link) (*model.System, error) {
 	ms, err := manifest.ReadAll(cfg.Manifests)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sys := link.Link(ms)
 	if err := os.MkdirAll(cfg.Out, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	g := render.System(sys)
 	mmd := render.Mermaid(g)
 	if cfg.Formats["json"] {
 		if err := manifest.WriteJSON(filepath.Join(cfg.Out, "system.json"), sys); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := writeTexts(cfg.Out, cfg.Formats, map[string]string{
@@ -515,30 +756,30 @@ func runLink(args []string) error {
 		"dot":     func() string { return render.DOT(g) },
 		"md":      func() string { return render.SystemReport(sys, mmd) },
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if cfg.Formats["html"] {
 		var dep *deploy.Deployment
 		if cfg.Deploy != "" {
 			if dep, err = deploy.ReadFile(cfg.Deploy); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		page, err := render.Explorer(sys, ms, dep)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.WriteFile(filepath.Join(cfg.Out, "system.html"), []byte(page), 0o644); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if cfg.Formats["agents"] {
 		if err := writeAgentFiles(cfg.Out, cfg.Manifests, ms, sys); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	logf("%d services, %d links, %d unmatched endpoints -> %s", len(sys.Services), len(sys.Links), len(sys.Dangling), cfg.Out)
-	return nil
+	return sys, nil
 }
 
 // writeAgentFiles writes the guide for AI agents and the compact system
@@ -581,15 +822,39 @@ func codegraphDir() string {
 // ---- fleet --------------------------------------------------------------------
 
 // runFleet analyses every repository with the same settings (one failing
-// repository is reported and skipped), then links all their manifests.
+// repository is reported and skipped), then links all their manifests. With
+// -reuse, a repository unchanged since that run (incremental.Key) has its
+// services copied from it instead of analysed again; fleet.json records the
+// keys for the next run.
 func runFleet(args []string) error {
 	f, err := config.ParseFleet(args)
 	if err != nil {
 		return err
 	}
-	var manifests, libraries, failed, apis, apiFailed []string
+	rec := &incremental.Record{Codegraph: buildVersion(), Created: time.Now().UTC()}
+	var prev *incremental.Record
+	if f.Reuse != "" {
+		if same, _ := sameDir(f.Reuse, f.Analyze.Out); same {
+			return errors.New("fleet: -reuse names the output directory; give the previous run's (make graph moves it to <out>.prev)")
+		}
+		if prev, err = incremental.Read(f.Reuse); err != nil {
+			logf("%v: every repository is analysed", err)
+		} else if prev == nil {
+			logf("%s: no record of its repositories (%s): every repository is analysed", f.Reuse, incremental.File)
+		}
+	}
+	toolchain, err := incremental.Toolchain()
+	if err != nil {
+		logf("no key for the next run to reuse this one by: %v", err)
+	}
+	settings := fleetSettings(f)
+	var manifests, libraries, failed, apis, apiFailed, reused []string
 	owner := map[string]string{} // service -> repository
 	for _, repo := range f.Repos {
+		entry := incremental.Repo{Dir: repo}
+		if abs, err := filepath.Abs(repo); err == nil {
+			entry.Dir = abs
+		}
 		cfg := f.Analyze
 		cfg.Dir, cfg.Entries = repo, f.Entries
 		if len(cfg.Entries) == 0 {
@@ -605,36 +870,64 @@ func runFleet(args []string) error {
 			default:
 				logf("%s: no main package, a library (skipped)", repo)
 				libraries = append(libraries, repo)
+				entry.Library = true
+				rec.Repos = append(rec.Repos, entry)
 				continue
 			}
 		}
+		entry.Library = cfg.Library
 		files := append(repoRules(repo, f.RepoRules), f.Analyze.RuleFiles...) // repository rules first, so they win
 		rules, err := transport.LoadRules(files, !f.Analyze.NoDefaultRules)
 		if err != nil {
 			return fmt.Errorf("%s: %w", repo, err)
 		}
-		written, err := analyzeRepoSafely(&cfg, rules)
-		if err != nil {
-			logf("%s: %v (skipped)", repo, err)
-			failed = append(failed, repo)
-		}
-		if f.API && !cfg.Library {
-			// The API of a repository with mains, as a library of its own.
-			api := cfg
-			api.Entries, api.Library = []string{"./..."}, true
-			api.Service = defaultName(modulePath(filepath.Join(repo, "go.mod")), modulePath(filepath.Join(repo, "go.mod"))) + "-api"
-			w, err := analyzeRepoSafely(&api, rules)
-			switch {
-			case errors.Is(err, errNoAPI):
-				logf("%s: no exported API to analyse", repo)
-			case err != nil:
-				logf("%s: its API: %v (skipped)", repo, err)
-				apiFailed = append(apiFailed, repo)
-			default:
-				apis = append(apis, api.Service)
+		entry.Head, entry.Key, entry.Why = incremental.Key(toolchain, repo, settings, files)
+		apiName := defaultName(modulePath(filepath.Join(repo, "go.mod")), modulePath(filepath.Join(repo, "go.mod"))) + "-api"
+		var written []string
+		if old := prev.Find(entry.Dir); old != nil && entry.Key != "" && old.Key == entry.Key && incremental.Has(f.Reuse, old.Services) {
+			if err := incremental.Copy(f.Reuse, f.Analyze.Out, old.Services); err != nil {
+				return fmt.Errorf("%s: reusing its analysis: %w", repo, err)
 			}
-			written = append(written, w...)
+			for _, svc := range old.Services {
+				written = append(written, filepath.Join(f.Analyze.Out, svc, "manifest.json"))
+				if f.API && svc == apiName {
+					apis = append(apis, svc)
+				}
+			}
+			entry.Reused = true
+			reused = append(reused, repo)
+			logf("%s: unchanged since %s, its analysis reused (%s)", repo, f.Reuse, strings.Join(old.Services, ", "))
+		} else {
+			if written, err = analyzeRepoSafely(&cfg, rules); err != nil {
+				logf("%s: %v (skipped)", repo, err)
+				failed = append(failed, repo)
+				entry.Failed = true
+			}
+			if f.API && !cfg.Library {
+				// The API of a repository with mains, as a library of its own.
+				api := cfg
+				api.Entries, api.Library, api.Service = []string{"./..."}, true, apiName
+				w, err := analyzeRepoSafely(&api, rules)
+				switch {
+				case errors.Is(err, errNoAPI):
+					logf("%s: no exported API to analyse", repo)
+				case err != nil:
+					logf("%s: its API: %v (skipped)", repo, err)
+					apiFailed = append(apiFailed, repo)
+					entry.Failed = true
+				default:
+					apis = append(apis, api.Service)
+				}
+				written = append(written, w...)
+			}
+			if entry.Failed {
+				entry.Key, entry.Why = "", "its analysis failed"
+			}
 		}
+		for _, p := range written {
+			entry.Services = append(entry.Services, filepath.Base(filepath.Dir(p)))
+		}
+		rec.Repos = append(rec.Repos, entry)
 		for _, p := range written {
 			svc := filepath.Base(filepath.Dir(p))
 			if prev, ok := owner[svc]; ok {
@@ -664,15 +957,53 @@ func runFleet(args []string) error {
 		return errors.New("fleet: no manifest written")
 	}
 	linkArgs := []string{"-out", filepath.Join(f.Analyze.Out, "_system"), "-format", formatList(f.Analyze.Formats)}
-	if err := runLink(append(linkArgs, manifests...)); err != nil {
+	lc, err := config.ParseLink(append(linkArgs, manifests...))
+	if err != nil {
+		return err
+	}
+	sys, err := linkRun(lc)
+	if err != nil {
+		return err
+	}
+	rec.Services, rec.Links, rec.Unmatched = len(sys.Services), len(sys.Links), len(sys.Dangling)
+	if err := rec.Write(f.Analyze.Out); err != nil {
 		return err
 	}
 	logf("fleet: %d repositories, %d services (%d declared %v), %d libraries %v, %d failed %v",
 		len(f.Repos), len(manifests), len(declared), declared, len(libraries), libraries, len(failed), failed)
+	if f.Reuse != "" {
+		logf("fleet: %d repositories unchanged since %s, their analysis reused", len(reused), f.Reuse)
+	}
 	if f.API {
 		logf("fleet: the API of %d repositories with mains %v, %d failed %v", len(apis), apis, len(apiFailed), apiFailed)
 	}
 	return nil
+}
+
+// fleetSettings is what a repository's analysis reads besides its own files
+// and rule files: every analysis setting (part of its incremental.Key).
+func fleetSettings(f *config.Fleet) any {
+	a := f.Analyze
+	a.Dir, a.Out = "", ""
+	return struct {
+		Analyze   config.Analyze
+		Entries   []string
+		Libraries bool
+		API       bool
+	}{a, f.Entries, f.Libraries, f.API}
+}
+
+// sameDir reports whether two paths name the same existing directory.
+func sameDir(a, b string) (bool, error) {
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	sb, err := os.Stat(b)
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(sa, sb), nil
 }
 
 // writeDeclared writes the manifests of the services described by hand in dir
@@ -737,6 +1068,9 @@ func runDiff(args []string) error {
 func runQuery(args []string) error {
 	cfg, err := config.ParseQuery(args, query.Commands)
 	if err != nil {
+		return err
+	}
+	if cfg.Run, cfg.Explorer, err = queryRun(cfg.Config, cfg.Profile, cfg.Run, cfg.Explorer); err != nil {
 		return err
 	}
 	run, err := query.Load(cfg.Run)
@@ -1124,16 +1458,40 @@ func runMCP(args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Run, cfg.Explorer, err = queryRun(cfg.Config, cfg.Profile, cfg.Run, cfg.Explorer); err != nil {
+		return err
+	}
 	dir, err := filepath.Abs(cfg.Run)
 	if err != nil {
 		return err
 	}
 	logf("mcp: answering from %s", dir)
-	if ms, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(ms) == 0 {
+	if ms, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(ms) == 0 && !bundle.IsBundle(dir) {
 		// Clients such as Claude Desktop start servers outside the repository, so a relative -run misses.
 		logf("mcp: no run in %s yet: answers will fail until make graph writes one there, or -run names the run's absolute path", dir)
 	}
 	return mcpserver.New(dir, buildVersion(), cfg.Explorer, cfg.Inventory).Run(context.Background(), &mcp.StdioTransport{})
+}
+
+// queryRun resolves the run (and the explorer) query and mcp read when -run
+// (-explorer) is not given: from the profile or the configuration file.
+func queryRun(configFlag, profileFlag, run, explorer string) (string, string, error) {
+	if run != "" && explorer != "" {
+		return run, explorer, nil
+	}
+	cf, err := configfile.Find(configFlag)
+	if err != nil {
+		return "", "", err
+	}
+	if explorer == "" && cf != nil {
+		explorer = cf.Query.Explorer
+	}
+	if run == "" {
+		if run, _, err = pipeline.QueryRun(cf, profileFlag); err != nil {
+			return "", "", err
+		}
+	}
+	return run, explorer, nil
 }
 
 // version is set by release builds (make release: -ldflags "-X main.version=v1.2.0").

@@ -21,6 +21,8 @@ graphs). No instrumentation, no traffic, no hand-drawn diagrams to keep up to da
 - **See an organisation at a glance.** Every repository's languages, Go versions, in-house dependencies and their
   drift, messaging libraries and container images, read in seconds without building anything.
 - **Know a library's reach.** What each exported function of a library does, and which services and journeys call it.
+- **Keep it current with one command.** A `~/.codegraph.yaml` names your routine (update the clones, read the
+  inventory, analyse, pack a bundle); `codegraph` alone runs it, analysing again only the repositories with new commits.
 - **Share it.** `codegraph bundle` packs a run into one small file (a 90-service run is about 1 MB) that anyone's
   `codegraph query` or MCP server reads directly: one machine analyses, everyone asks.
 
@@ -66,8 +68,10 @@ outbound call continues with the journey of the endpoint it reaches.
    view, an interactive explorer, and files for AI agents.
 
 Around this core: `fleet` runs the analysis over many repositories, `inventory` reads a whole organisation cheaply,
-`deploy` reads what an environment runs from its Helm chart, `diff` compares two runs, and `query` and `mcp` answer
-questions about a run.
+`deploy` reads what an environment runs from its Helm chart, `diff` compares two runs, `bundle` packs a run into one
+file, and `query` and `mcp` answer questions about a run. `codegraph run` chains them as steps (a pipeline of a
+configuration file, or one step by name, as the Makefile does), reusing the analysis of the repositories that have not
+changed since the previous run.
 
 ## Getting started, step by step
 
@@ -127,15 +131,17 @@ go run ./cmd/codegraph query -run tmp/first services
 GOFLAGS=-mod=readonly go run ./cmd/codegraph fleet -out tmp/graph /path/to/repo-a /path/to/repo-b ~/src/*.git
 ```
 
-or with the Makefile, over a directory of clones named `<repo>.git` (every one with a `go.mod`), or a list:
+or with `codegraph run graph` (`make graph`), over a directory of clones (`<repo>.git` or `<repo>`, every one with a
+`go.mod`), or a list:
 
 ```sh
-make graph REPOS_DIR=~/src                                     # every ~/src/*.git
+go run ./cmd/codegraph run graph -root ~/src                   # every Go repository of ~/src
+make graph REPOS_DIR=~/src                                     # the same, through the Makefile
 make graph REPOS="/path/to/repo-a /path/to/repo-b" OUT=tmp/graph  # these repositories
 ```
 
-`make graph` also checks that no repository's `git status` changed, and from the second run on writes `diff.md`, what
-changed since the previous run.
+`run graph` also checks that no repository's `git status` changed, and from the second run on reuses the analysis of
+the repositories without new commits and writes `diff.md`, what changed since the previous run.
 
 **6. Teach it your in-house code** (only if you have some):
 - **Your own messaging or cache libraries:** describe their APIs in a rules file (`-rules rules.json`, `RULES=` for
@@ -151,8 +157,10 @@ changed since the previous run.
 Markdown or JSON, with `file:line` positions; `codegraph mcp` serves the same answers to Claude Code and Claude Desktop
 (see [MCP server](#mcp-server-claude-code-claude-desktop)).
 
-**8. Keep it current.** Pull the repositories and run `make graph` again: the previous run moves to `<OUT>.prev`, and
-`<OUT>/diff.md` lists the links, services and endpoints that changed (see [Reviewing changes](#reviewing-changes)).
+**8. Keep it current.** Pull the repositories and run `make graph` again: the previous run moves to `<OUT>.prev`, only
+the repositories with new commits are analysed again, and `<OUT>/diff.md` lists the links, services and endpoints that
+changed (see [Reviewing changes](#reviewing-changes)). To make it one command, `codegraph init` writes a
+`~/.codegraph.yaml` whose default pipeline `codegraph` alone then runs (see [Daily runs](#daily-runs-codegraphyaml)).
 
 ## Running with Docker
 
@@ -173,7 +181,8 @@ make docker-image
 make docker-test
 ```
 
-**3. Analyse repositories in it.** `docker-graph` is `make graph` in the image, with the same variables:
+**3. Analyse repositories in it.** `docker-graph` runs `codegraph run graph` in the image, with the same variables
+as `make graph` and the same settings (the profile's, when `PROFILE` is set):
 
 ```sh
 make docker-graph REPOS_DIR=~/src OUT=tmp/graph
@@ -181,15 +190,16 @@ make docker-graph REPOS="$HOME/src/repo-a.git $HOME/src/repo-b.git" REPOS_DIR=~/
 ```
 
 Then open `tmp/graph/_system/system.html` on the host, or query it there. What the container sees:
-- **Repositories:** `REPOS_DIR`, mounted read-only (`REPOS` must be under it); the environment's chart too, when it is
-  under it.
-- **Outputs:** `OUT`'s parent directory, mounted read-write, so the run lands on the host and the previous one can move
-  aside.
+- **Repositories:** the run's `root` (`REPOS_DIR`, or the profile's), mounted read-only at `/repos` (`REPOS` must be
+  under it); the environment's chart too, when it is under it (a profile's `{root}/…` chart follows it there).
+- **Outputs:** the run's `out` parent directory, mounted read-write, so the run lands on the host, the previous one can
+  move aside and its unchanged repositories' analysis is reused.
 - **Go module cache:** the host's (`GOMODCACHE`), so modules already downloaded need neither network nor credentials;
   the build cache is a named volume (`codegraph-gocache`).
 - **Private modules not cached yet:** a `~/.netrc` (`NETRC=`) or a `GOPROXY` is passed in, with `GOPRIVATE`. A netrc
   works for Go and git with any host: `machine github.com login x-access-token password <token>`.
-- **Profile:** mounted read-only when `PROFILE` is set; a knowledge base file (`KB`) likewise.
+- **Profile:** mounted read-only when `PROFILE` is set. Its checks run in the image too, so a check reading files
+  outside the profile skips itself or fails there (`CHECKS=` runs none).
 
 The image also runs codegraph directly, for one repository without the Makefile:
 
@@ -204,13 +214,21 @@ docker run --rm -v /path/to/repo:/repo:ro -v "$PWD/out":/out -v "$(go env GOMODC
 ## Commands at a glance
 
 ```sh
-make graph      # analyse every Go clone of REPOS_DIR (../*.git), link them, compare with the previous run
+codegraph init  # write ~/.codegraph.yaml: your profiles and pipelines (see Daily runs)
+codegraph       # run its default pipeline;  codegraph run <pipeline|step>: another, or one step
+codegraph run graph -dry-run  # print what a run would do, as a shell script
+codegraph config  # every setting a run resolves, and where it comes from;  codegraph check: check them
+codegraph status  # how current the last run is, and which repositories have new commits since
+
+make graph      # analyse every Go repository of REPOS_DIR (..), link them, compare with the previous run
 make graph REPOS_DIR=~/src OUT=/tmp/graph   # other repositories or output
 make inventory  # read every repository of REPOS_DIR (seconds), and with FOCUS find the frontier around it
 make org        # the first time with a FOCUS: graph the focus, find its frontier from that run, graph both
 make deploy     # what an environment runs (DEPLOY_CHART; helm template, offline), matched to the last run
 make open       # open the explorer of the last run (tmp/graph/_system/system.html)
 make diff       # what changed since the previous run (make graph also does it; report in tmp/graph/diff.md)
+make checks     # the profile's checks on the last run (make graph also runs them)
+make config     # codegraph config;  make check: codegraph check;  make status: codegraph status
 make query Q='services'   # ask the last run (also: service, journey, who, path, impact, search)
 make samples    # analyse the bundled samples
 make test       # gofmt, go vet and the tests;  make cover: their coverage (minimum COVER_MIN, 70%)
@@ -221,10 +239,87 @@ make bundle     # pack the last run into one file to share (tmp/graph.tar.gz; BU
 make help       # every target
 ```
 
-Every target and variable: `make help`, and the top of the `Makefile`. `make graph` runs with `GOFLAGS=-mod=readonly`.
-With `FOCUS` (a file naming repositories, one per line), it analyses those and the frontier `make inventory` last
+Every command also answers to a one-letter short form, its first letter, in upper case for the second command of a
+letter: `r` run, `c` config, `C` check, `s` status, `I` init, `a` analyze, `l` link, `f` fleet, `d` diff, `q` query,
+`m` mcp, `i` inventory, `D` deploy, `b` bundle, `v` version, `h` help (`codegraph c -get out` is `codegraph config
+-get out`). Commands take no dashes, as `-config`, `-run` and `-inventory` are flags; `-h`/`--help` and
+`-v`/`--version` work as usual.
+
+Every target and variable: `make help`, and the top of the `Makefile`. The run targets are `codegraph run <step>`:
+their settings come from the profile and the configuration file, and a variable given to make (`OUT=`, `FOCUS=`,
+`API=1`, `FULL=1`, …) overrides them; `make config` shows the result. `make graph` runs with `GOFLAGS=-mod=readonly`.
+With a focus (a file naming repositories, one per line), it analyses those and the frontier `make inventory` last
 wrote (`tmp/inventory/frontier.txt`, see [Inventory and frontier](#inventory-and-frontier)) instead of every clone;
 the frontier is found best from a run of the focus, hence `make org` the first time.
+
+## Daily runs: `.codegraph.yaml`
+
+With a configuration file, `codegraph` alone runs your routine: update the clones, read the inventory, analyse what
+changed, pack a bundle. The steps are the Makefile's, so `make graph` and a pipeline's `graph` do the same.
+
+**1. Write it.** `codegraph init` writes `~/.codegraph.yaml`, every setting listed in its comments; `-profile <dir>`
+gives it a pipeline using that profile. A file with two pipelines:
+
+```yaml
+version: 1
+profiles:
+  acme: ~/src/acme-codegraph         # an organisation's profile directory (its profile.yaml)
+profile: acme                        # the profile when nothing else names one
+default: daily                       # what codegraph alone runs
+
+pipelines:
+  daily:
+    profile: acme
+    out: ~/codegraph/acme            # settings over the profile's, for every step
+    bundle: ~/codegraph/acme.tar.gz
+    steps:
+      - exec: ~/bin/pull-all ~/src   # a command of yours first: updating the clones, say
+      - inventory
+      - graph                        # fleet, then the deployment, the checks and the diff with the run before
+      - bundle
+  apis:
+    profile: acme
+    steps:
+      - graph: {api: true, out: ~/codegraph/acme-api}   # a step's own settings
+
+query:
+  run: ~/codegraph/acme.tar.gz       # what query and mcp read without -run
+```
+
+**2. Check it.** `codegraph config` shows every setting and the layer it comes from (`-pipeline <name>` for another
+pipeline's, `-pipeline none` for a step run by name, as make's targets run them, and `-get <setting>` for one value), `codegraph check` checks the tools, files and repositories a run needs,
+and `codegraph run -dry-run` prints what a run would do, as a shell script, running nothing.
+
+**3. Run it.** `codegraph` runs the default pipeline, `codegraph run <pipeline>` another, and `codegraph run graph`
+one step with the profile's settings (`inventory`, `graph`, `deploy`, `checks`, `diff`, `bundle`, and `org` for graph,
+inventory, graph). Each run ends with a summary: every step's time and result. `codegraph status` tells how current the
+last run is: when and by which codegraph it was made, and which repositories have new commits since.
+
+- **Where it is found:** `-config <file>` (`none` for none), else `$CODEGRAPH_CONFIG`, else `.codegraph.yaml` in the
+  current directory, else in the home directory. Paths in it are relative to it; `~` is the home directory.
+- **Settings in layers:** the built-in defaults, then the profile's `defaults`, then the pipeline's, then the step's,
+  then the command line's (`codegraph run daily -out /tmp/x -full`). `codegraph run -h` lists them as flags, the YAML
+  keys in kebab case (`repoRules` is `-repo-rules`). In a path, `{root}` and `{out}` stand for those settings, wherever
+  they end up. The profile is `-profile` (a name of `profiles`, or a directory), else the pipeline's, else
+  `$CODEGRAPH_PROFILE`, else the file's `profile`.
+- **Commands** (exec steps, and a profile's checks) run only from a file in the home directory or named by `-config`
+  or `$CODEGRAPH_CONFIG`, and from the profiles named there, by `-profile` or by `$CODEGRAPH_PROFILE`. A
+  `.codegraph.yaml` in the current directory could come with someone else's repository, so codegraph refuses to run
+  its commands and says how to allow them. Exec steps run in the file's directory, with the run's directory in
+  `$CODEGRAPH_RUN` and `root` in `$CODEGRAPH_ROOT`.
+- **Unknown keys** are warnings, with a suggestion when one is close (`unknown key "repo-rules", ignored (did you mean
+  "repoRules"?)`), so a file written for a newer codegraph still runs. A value of the wrong type, an unknown step or a
+  newer `version` stop it.
+- **codegraph alone** runs the default pipeline only from a terminal. Anything else, such as an MCP client started
+  without arguments, gets the usage and never starts a run.
+
+**Reusing the analysis of unchanged repositories.** `graph` keeps the previous run as `<out>.prev` and gives it to
+`codegraph fleet -reuse`: a repository whose key is the one recorded there has its services copied instead of analysed
+again. The key covers its files (the git tree of its directory), codegraph itself (its executable), the Go toolchain
+and environment (`go env`), the analysis settings and the rule files. A repository with uncommitted changes, outside
+git, or whose `go.mod` replaces a module with a local directory is always analysed. `fleet.json` in the run records
+each repository's commit, key and services. On a 38-repository run, a day without new commits takes 7 seconds instead
+of 3 minutes, with byte-identical manifests; `-full` (`full: true`, `FULL=1` for make) analyses everything again.
 
 ## Many repositories: `codegraph fleet`
 
@@ -241,7 +336,9 @@ code) come from its `codegraph-rules.json`, if it has one, and from `-repo-rules
 `<module name>.json` files kept outside the repositories (`rules/repos/orders.json` for
 `example.com/orders/v2`); they take precedence over the shared rules. Loading needs every dependency in the module cache;
 run with `GOFLAGS=-mod=readonly` so the repositories are never modified, and with
-`GOPRIVATE=<your module prefix>` so private modules are fetched directly over git (SSH). A repository
+`GOPRIVATE=<your module prefix>` so private modules are fetched directly over git (SSH). `-reuse <previous run>`
+copies the services of the repositories unchanged since that run instead of analysing them again (see [Daily
+runs](#daily-runs-codegraphyaml)); `fleet.json` records what each repository gave. A repository
 with cgo dependencies needs their C toolchain: `lestrrat-go/libxml2`, for instance, needs `pkg-config`
 (on macOS, `brew install pkgconf`; Homebrew provides `libxml-2.0.pc` for the SDK's libxml2).
 
@@ -254,7 +351,14 @@ the main reads: the `env` tags of the configuration types its reachable code pas
 dependencies' included; the fields of the spec passed to kelseyhightower/envconfig's `Process(prefix, &spec)` (an
 `envconfig` tag names a field, otherwise the prefix and the field name, `split_words` applied, with nested structs'
 names as prefixes, `ignored:"true"` skipped); and the constant names given to `os.Getenv`/`os.LookupEnv` outside the
-standard library. Names computed at run time (viper's AutomaticEnv, a prefix passed as a Parse option) are not seen. The service diagram draws at most 450
+standard library. Names computed at run time (viper's AutomaticEnv, a prefix passed as a Parse option) are not seen.
+
+At the run's root, `fleet` writes `fleet.json`: each repository analysed, the commit it was at, the key that lets the
+next run reuse its analysis (see [Daily runs](#daily-runs-codegraphyaml)), the services it gave, and the link's
+counts. `codegraph run graph` (`make graph`) adds `deploy/` (the environment's deployment, when a chart is set), the
+outputs of the profile's checks, and `diff.md` (the changes since the previous run, kept in `<out>.prev`).
+
+The service diagram draws at most 450
 edges (Mermaid's default limit is 500): for very large services it keeps every endpoint and the
 heaviest component calls, and says how many calls it left out (all are in the report's tables). The link step writes
 `system.{json,mmd,dot,md}`; `system.md` has one sequence diagram per journey that crosses services, or for a journey
@@ -313,7 +417,11 @@ the analysed services' dependencies. Every responsibility is a separate package,
 
 | Package | Responsibility |
 |---|---|
-| `internal/config` | CLI flags for every command: `analyze`, `link`, `fleet`, `diff`, `query`, `mcp`, `inventory`, `deploy` |
+| `internal/config` | CLI flags for every command: `analyze`, `link`, `fleet`, `diff`, `query`, `mcp`, `inventory`, `deploy`, `bundle`, `run`, `config`, `check`, `status`, `init` |
+| `internal/options` | The settings of runs in layers (built-in, profile, pipeline, step, command line), as YAML keys and flags; YAML read with warnings for unknown keys |
+| `internal/configfile` | The configuration file (`.codegraph.yaml`): where it is found, whether it may run commands, its profiles and pipelines; `codegraph init`'s template |
+| `internal/pipeline` | `codegraph run`: the steps (exec, inventory, graph, deploy, checks, diff, bundle), dry runs and summaries; `config`, `check` and `status` |
+| `internal/incremental` | Reuse of a previous run's analysis of unchanged repositories (`fleet -reuse`, `fleet.json`) |
 | `internal/loader` | `go/packages` load with full syntax/types; module vs. third-party vs. std bookkeeping |
 | `internal/program` | SSA construction (`ssautil.AllPackages`, generics instantiated), main packages |
 | `internal/reach` | Call graph + reachability from `init`/`main` (or any roots): `cha`, `rta`, `vta` (default, seeded by RTA) |
@@ -335,7 +443,7 @@ the analysed services' dependencies. Every responsibility is a separate package,
 | `internal/deploy` | Reads what an environment runs from its rendered chart, matches it to repositories (by the images they build, else by name) and services, and checks the links against its configured addresses (`codegraph deploy`) |
 | `internal/settings` | The environment variables a main reads (`env` tags of parsed configuration types, `os.Getenv`), for the manifest |
 | `internal/declared` | Services described by hand (`declared/<service>.json`), turned into manifests for the run |
-| `internal/profile` | An organisation's profile (`profile.json`): the naming conventions the inventory relies on |
+| `internal/profile` | An organisation's profile (`profile.yaml`): the naming conventions the inventory relies on, and the defaults of its runs |
 | `internal/model`, `internal/symbols` | Shared data model and naming helpers |
 
 ## Flags (`codegraph analyze`)
@@ -703,38 +811,57 @@ go run ./cmd/codegraph deploy -rendered objects.yaml …   # objects rendered al
 ## Profiles
 
 What codegraph cannot guess about an organisation lives in a profile: a directory kept apart from this repository (a
-private repository of its own, or `profile/` here, which git ignores). `PROFILE=<dir>` on make, or
-`CODEGRAPH_PROFILE=<dir>` in the environment, points at it. It holds:
+private repository of its own, or `profile/` here, which git ignores). `-profile <dir>` (`PROFILE=<dir>` on make),
+`CODEGRAPH_PROFILE=<dir>` in the environment, or a [configuration file](#daily-runs-codegraphyaml) points at it. Its
+`profile.yaml` holds the organisation's conventions and the defaults of its runs, paths relative to the profile:
 
-- `profile.mk`: the Makefile's settings, read before their defaults (`REPOS_DIR`, `FOCUS`, `RULES`, `REPO_RULES`,
-  `DECLARED`, `INCLUDE_MODULES`, `GOPRIVATE`, `DEPLOY_CHART`, `OUT`, `KBCHECK`, `DENYLIST`, …), with paths through
-  `$(PROFILE)` since make runs in this directory;
-- `profile.json`: the naming conventions `codegraph inventory -profile` relies on, all optional:
+```yaml
+version: 1
+# Naming conventions the inventory relies on, all optional.
+messaging:
+  - {name: kafkabus v2, transport: kafka, module: example.com/kafkabus/v2}
+clientLibrarySuffix: -sdk-go
+contractImport: /contracts/{package}
+catalogues: [protos]
+workflowImage: "{IMAGE_PREFIX}-{PROJECT}"
 
-  ```json
-  {
-    "messaging": [{"name": "kafkabus v2", "transport": "kafka", "module": "example.com/kafkabus/v2"}],
-    "clientLibrarySuffix": "-sdk-go",
-    "contractImport": "/contracts/{package}",
-    "catalogues": ["protos"],
-    "workflowImage": "{IMAGE_PREFIX}-{PROJECT}"
-  }
-  ```
+# The defaults of runs with the profile (codegraph run -h describes every setting).
+defaults:
+  root: ../src                       # the organisation's clones
+  focus: department.txt              # the repositories around which inventory finds the frontier
+  rings: 2
+  out: tmp/graph
+  inventory: tmp/inventory
+  chart: "{root}/deploy.git/chart"   # production's Helm chart, under root wherever root is set
+  rules: [rules/inhouse.json]
+  repoRules: rules/repos
+  declared: declared
+  includeModules: [example.com/*-sdk-go]
+  goprivate: example.com
+  denylist: denylist.txt
+  checks:                            # commands run after each graph, given the run in $CODEGRAPH_RUN
+    - name: architecture
+      run: python3 scripts/compare.py architecture.md "$CODEGRAPH_RUN"
+      output: architecture.json      # their output, kept in the run
+```
 
-  `messaging` adds in-house libraries to the inventory's Kafka and RabbitMQ report; `clientLibrarySuffix` names a
+- `messaging` adds in-house libraries to the inventory's Kafka and RabbitMQ report; `clientLibrarySuffix` names a
   service's client library (`<service>-sdk-go`); `contractImport` is where a proto package's generated code lives
   (`{package}` with dots as slashes); `catalogues` are the repositories whose `proto/` trees define the contracts;
   `workflowImage` is the image an organisation's reusable CI workflow builds from a calling job's inputs
-  (`{INPUT}` placeholders), for the inventory's container images;
-- the rule files, the services described by hand, a `FOCUS` file, and whatever `KBCHECK` runs: a command given the run
-  directory, printing JSON (`make kbcheck`, run by `make graph`), such as a comparison with an architecture
-  knowledge base;
-- a denylist for `make audit`: words (the organisation's name, its repositories and services) no file of this
-  repository may contain.
+  (`{INPUT}` placeholders), for the inventory's container images.
+- `defaults` are the settings of [Daily runs](#daily-runs-codegraphyaml), over the built-in ones; a configuration
+  file's pipeline, a step and the command line override them, in that order. `codegraph config -profile <dir>` shows
+  the result.
+- The rest of the profile is what its settings name: the rule files, the services described by hand, the focus file,
+  the checks' scripts, and the denylist for `make audit` (words, such as the organisation's name and its
+  repositories and services, that no file of this repository may contain).
+- As with a configuration file, unknown keys are warnings. A profile from before `profile.yaml` still has its
+  `profile.json` read for the conventions; its `profile.mk` is not read any more: move both into `profile.yaml`.
 
 A profile can carry its own `Makefile` that runs this one's targets with `PROFILE=$(CURDIR)` (`make -C <codegraph>
-graph PROFILE=$(CURDIR)`), its runs (`OUT`, `INVENTORY`), and its notes for people and agents. With a profile,
-`make test` also loads its rule files.
+graph PROFILE=$(CURDIR)`), its runs, and its notes for people and agents. With a profile, `make test` also loads its
+rule files.
 
 ## Asking questions (people and AI agents)
 
@@ -751,7 +878,12 @@ codegraph query -run tmp/graph uses envconfig.Process           # who calls a li
 codegraph query -run tmp/graph image registry.example.com/team/app:v1  # which repositories build or use an image, where it runs
 codegraph query -run tmp/graph search invoice                   # services, journeys and keys by name
 make query Q='who orders.created'                               # the same, on the last make graph run
+codegraph query services                                        # without -run: the run your configuration names
 ```
+
+Without `-run`, `query` and `mcp` read the run of `-profile` (its `out`), else of `$CODEGRAPH_PROFILE`, else the
+configuration file's `query.run`, else its profile's, else `tmp/graph`; `codegraph config` prints which, and
+`codegraph status` how current it is.
 
 `image` reads the inventory next to the run (`<run>/../inventory/inventory.json`, as the Makefile lays them out; `-inventory`
 points elsewhere) and the run's deployment (`<run>/deploy/deploy.json`).
@@ -772,12 +904,12 @@ Each run also gets the files AI agents need (format `agents`, on by default):
   rules for answers (cite positions, `*` is unknown, `name-only` is weak evidence, missing is not absent).
 - `_system/context.md`: the whole system in one compact file (tens of KB for a large run), to attach to a chat.
 
-In this repository, the Claude Code skill `.claude/skills/codegraph` points at `tmp/graph` and its `AGENTS.md`, so
-architecture questions asked in Claude Code use the run.
+In this repository, the Claude Code skill `.claude/skills/codegraph` finds the run (`tmp/graph`, or the one the
+configuration file names) and its `AGENTS.md`, so architecture questions asked in Claude Code use the run.
 
 ### MCP server (Claude Code, Claude Desktop)
 
-`codegraph mcp -run <run dir>` serves the same answers over the Model Context Protocol on stdin and stdout, to clients
+`codegraph mcp -run <run dir or bundle>` serves the same answers over the Model Context Protocol on stdin and stdout, to clients
 without a shell. It is a local process; nothing listens on the network.
 - **Tools:** `services`, `service`, `journey`, `who`, `path`, `impact`, `uses`, `image` and `search`, each answering in Markdown
   (`json: true` for JSON). A mistake comes back as an error the model can read, such as a misspelt service with
@@ -788,7 +920,8 @@ without a shell. It is a local process; nothing listens on the network.
 - **Resources:** `codegraph://guide` (the vocabulary and rules of `AGENTS.md`) and `codegraph://context` (the whole
   system in one file).
 - **Run:** loaded on the first question and reloaded when `make graph` replaces it. Before any run exists, questions
-  say to run `make graph`.
+  say to run `make graph`. Without `-run`, it is the one `codegraph query` reads: the configuration file's
+  `query.run`, else the profile's run.
 
 To connect it:
 - **Claude Code:** `.mcp.json` in this repository starts it (`go run ./cmd/codegraph mcp -run tmp/graph`) in sessions opened
@@ -803,6 +936,7 @@ To connect it:
   }
   ```
 
+  - With a `~/.codegraph.yaml` naming the run (`query.run`), `"args": ["mcp"]` is enough, and the run follows the file.
   - Both paths must be absolute, and `args` is required: Claude Desktop starts servers outside the repository, and
     without `mcp` codegraph prints its usage and exits ("Server disconnected"). Its log (`~/Library/Logs/Claude/
     mcp-server-codegraph.log`) then shows a line saying which arguments are missing, or that `-run` holds no run.
@@ -825,8 +959,8 @@ make bundle BUNDLE_FLAGS=-no-settings                 # the last make graph run,
 ```
 
 Every command that reads a run reads a bundle the same way: `-run run.tar.gz` for `query`, `mcp`, `diff`, `deploy`
-and `inventory`. A central machine can run `make inventory`, `make graph` and `make bundle` on a schedule and publish
-the file; everyone else points their own `codegraph mcp` at their copy, which it reloads when the file is replaced.
+and `inventory`. A central machine can run a pipeline ending in `bundle` (or `make inventory`, `make graph` and `make
+bundle`) on a schedule and publish the file; everyone else points their own `codegraph mcp` at their copy, which it reloads when the file is replaced.
 
 - **Contents:** `bundle.json` (the metadata), `<service>/manifest.json`, `deploy/deploy.json` and `inventory.json`
   when the run has them, and `_system/system.html`. Extracted (`tar xf`), it is a run directory. The system view is
@@ -862,8 +996,9 @@ write them. It links both and reports in Markdown, ready for a review comment:
 `-out` writes the report to a file. `-fail-on-links` exits with status 1 when a cross-service link changed, so a CI
 job can ask for a second look.
 
-`make graph` keeps the previous run in `tmp/graph.prev` and writes `tmp/graph/diff.md` against it. In CI, run `codegraph`
-on a change's base and head and diff the two runs. A service's own repository gives its endpoints. The other
+`make graph` (`codegraph run graph`) keeps the previous run in `tmp/graph.prev` and writes `tmp/graph/diff.md` against
+it; `codegraph status` says which repositories have new commits since the last run. In CI, run `codegraph` on a
+change's base and head and diff the two runs. A service's own repository gives its endpoints. The other
 services' manifests, from a stored run of the main branches, give the links.
 
 ## How linking works
@@ -938,7 +1073,8 @@ make release VERSION=v1.2.0   # the release binaries, in bin/
 
 Each responsibility is its own package under `internal/` (see [Layout](#layout)), wired in `cmd/codegraph/main.go`.
 The samples under `testdata/` (each its own module, offline, with local stubs for third-party libraries) are what the
-golden test, `cmd/codegraph/main_test.go`, checks. `.github/workflows/test.yml` runs `make test` and `make cover` on
+golden test, `cmd/codegraph/main_test.go`, checks; `cmd/codegraph/pipeline_test.go` runs a configuration file's pipeline
+over git clones of two samples, reusing their analysis when they have not changed. `.github/workflows/test.yml` runs `make test` and `make cover` on
 every push and pull request. `CLAUDE.md` holds the design decisions and conventions behind the code, for contributors
 and coding agents alike.
 

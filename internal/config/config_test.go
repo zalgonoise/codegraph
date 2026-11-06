@@ -79,3 +79,29 @@ func TestParseBundle(t *testing.T) {
 		}
 	}
 }
+
+// codegraph run takes pipelines and steps with flags before, between or after
+// them; paths given as flags become absolute.
+func TestParseRun(t *testing.T) {
+	c, err := ParseRun("run", []string{"-dry-run", "inventory", "-out", "tmp/x", "graph", "-api", "-include-modules", "a,b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if !c.DryRun || strings.Join(c.Names, ",") != "inventory,graph" || *c.Options.Out != filepath.Join(wd, "tmp/x") ||
+		!*c.Options.API || strings.Join(*c.Options.Include, ",") != "a,b" {
+		t.Errorf("ParseRun = %+v", c)
+	}
+	if c, err := ParseRun("config", []string{"-pipeline", "daily", "-get", "out"}); err != nil || c.Pipeline != "daily" || c.Get != "out" {
+		t.Errorf("config: %+v, %v", c, err)
+	}
+	if _, err := ParseRun("status", []string{"daily"}); err == nil {
+		t.Error("status takes no arguments")
+	}
+	if _, err := ParseRun("run", []string{"-algo", "dfs"}); err == nil {
+		t.Error("an invalid option should fail")
+	}
+	if c, err := ParseInit([]string{"-out", "x.yaml", "-force"}); err != nil || c.Out != "x.yaml" || !c.Force {
+		t.Errorf("ParseInit = %+v, %v", c, err)
+	}
+}
