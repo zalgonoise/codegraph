@@ -203,10 +203,18 @@ func (s *store) markPaid(ctx context.Context, id string) error {
 	return s.db.WithContext(ctx).Model(&invoice{}).Where("id = ?", id).Updates(map[string]any{"paid": true}).Error
 }
 
+// receipts lists an invoice's receipts not refunded: a query a helper builds,
+// ended here, and a subquery passed to it, both read.
 func (s *store) receipts(ctx context.Context, id string) ([]receipt, error) {
 	var rs []receipt
-	err := s.db.WithContext(ctx).Table("receipts AS r").Where("r.invoice_id = ?", id).Find(&rs).Error
+	refunded := s.db.Table("refunds").Where("invoice_id = ?", id)
+	err := s.receiptsOf(ctx, id).Where("r.id NOT IN (?)", refunded).Find(&rs).Error
 	return rs, err
+}
+
+// receiptsOf builds an invoice's receipts query; its callers end it.
+func (s *store) receiptsOf(ctx context.Context, id string) *gorm.DB {
+	return s.db.WithContext(ctx).Table("receipts AS r").Where("r.invoice_id = ?", id)
 }
 
 func (h *handler) remind(_ context.Context, m *types.Message) error {

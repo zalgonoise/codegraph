@@ -274,7 +274,7 @@ func runRun(args []string) error {
 				logf("warning: %s", w)
 			}
 		}
-		r := &pipeline.Runner{Dispatch: dispatch, DryRun: cfg.DryRun, Log: logf}
+		r := &pipeline.Runner{Dispatch: dispatch, DryRun: cfg.DryRun, Log: logf, Version: buildVersion()}
 		if _, err := r.Run(plan); err != nil {
 			return err
 		}
@@ -736,7 +736,13 @@ func linkRun(cfg *config.Link) (*model.System, error) {
 	if err != nil {
 		return nil, err
 	}
-	sys := link.Link(ms)
+	var dep *deploy.Deployment
+	if cfg.Deploy != "" {
+		if dep, err = deploy.ReadFile(cfg.Deploy); err != nil {
+			return nil, err
+		}
+	}
+	sys := link.LinkWith(ms, dep.LinkOptions())
 	if err := os.MkdirAll(cfg.Out, 0o755); err != nil {
 		return nil, err
 	}
@@ -759,12 +765,6 @@ func linkRun(cfg *config.Link) (*model.System, error) {
 		return nil, err
 	}
 	if cfg.Formats["html"] {
-		var dep *deploy.Deployment
-		if cfg.Deploy != "" {
-			if dep, err = deploy.ReadFile(cfg.Deploy); err != nil {
-				return nil, err
-			}
-		}
 		page, err := render.Explorer(sys, ms, dep)
 		if err != nil {
 			return nil, err
@@ -774,7 +774,7 @@ func linkRun(cfg *config.Link) (*model.System, error) {
 		}
 	}
 	if cfg.Formats["agents"] {
-		if err := writeAgentFiles(cfg.Out, cfg.Manifests, ms, sys); err != nil {
+		if err := writeAgentFiles(cfg.Out, cfg.Manifests, ms, sys, dep); err != nil {
 			return nil, err
 		}
 	}
@@ -785,7 +785,7 @@ func linkRun(cfg *config.Link) (*model.System, error) {
 // writeAgentFiles writes the guide for AI agents and the compact system
 // summary. AGENTS.md goes to the run directory (where the manifests are) when
 // the link output is inside it, as with fleet; otherwise next to context.md.
-func writeAgentFiles(out string, paths []string, ms []*model.Manifest, sys *model.System) error {
+func writeAgentFiles(out string, paths []string, ms []*model.Manifest, sys *model.System, dep *deploy.Deployment) error {
 	runDir := ""
 	for _, p := range paths {
 		dir := filepath.Dir(filepath.Dir(p))
@@ -803,6 +803,7 @@ func writeAgentFiles(out string, paths []string, ms []*model.Manifest, sys *mode
 		}
 	}
 	r := query.New(runDir, ms, sys)
+	r.Deploy = dep
 	if err := os.WriteFile(filepath.Join(guideDir, "AGENTS.md"), []byte(query.Guide(r, codegraphDir())), 0o644); err != nil {
 		return err
 	}
@@ -849,6 +850,7 @@ func runFleet(args []string) error {
 	}
 	settings := fleetSettings(f)
 	var manifests, libraries, failed, apis, apiFailed, reused []string
+	var failures fleetFailures
 	owner := map[string]string{} // service -> repository
 	for _, repo := range f.Repos {
 		entry := incremental.Repo{Dir: repo}
@@ -901,6 +903,7 @@ func runFleet(args []string) error {
 			if written, err = analyzeRepoSafely(&cfg, rules); err != nil {
 				logf("%s: %v (skipped)", repo, err)
 				failed = append(failed, repo)
+				failures = append(failures, pipeline.Failure{Item: filepath.Base(repo), Err: err.Error()})
 				entry.Failed = true
 			}
 			if f.API && !cfg.Library {
@@ -914,6 +917,7 @@ func runFleet(args []string) error {
 				case err != nil:
 					logf("%s: its API: %v (skipped)", repo, err)
 					apiFailed = append(apiFailed, repo)
+					failures = append(failures, pipeline.Failure{Item: filepath.Base(repo) + " (its API)", Err: err.Error()})
 					entry.Failed = true
 				default:
 					apis = append(apis, api.Service)
@@ -977,8 +981,29 @@ func runFleet(args []string) error {
 	if f.API {
 		logf("fleet: the API of %d repositories with mains %v, %d failed %v", len(apis), apis, len(apiFailed), apiFailed)
 	}
+	if len(failures) > 0 {
+		for _, x := range failures {
+			logf("fleet: failed: %s: %s", x.Item, x.Err)
+		}
+		return failures
+	}
 	return nil
 }
+
+// fleetFailures is fleet's error when repositories failed: it analysed and
+// linked the others, and wrote everything. A pipeline's graph step goes on
+// past it (pipeline.Partial) and lists them at the run's end.
+type fleetFailures []pipeline.Failure
+
+func (f fleetFailures) Error() string {
+	items := make([]string, len(f))
+	for i, x := range f {
+		items[i] = x.Item
+	}
+	return fmt.Sprintf("%s failed: %s", count(len(f), "repository", "repositories"), strings.Join(items, ", "))
+}
+
+func (f fleetFailures) Failures() []pipeline.Failure { return f }
 
 // fleetSettings is what a repository's analysis reads besides its own files
 // and rule files: every analysis setting (part of its incremental.Key).
@@ -1039,15 +1064,15 @@ func runDiff(args []string) error {
 	if err != nil {
 		return err
 	}
-	base, err := readRun(cfg.Base)
+	base, bdep, err := readRun(cfg.Base)
 	if err != nil {
 		return err
 	}
-	head, err := readRun(cfg.Head)
+	head, hdep, err := readRun(cfg.Head)
 	if err != nil {
 		return err
 	}
-	r := diff.Compare(base, head)
+	r := diff.CompareWith(base, head, bdep.LinkOptions(), hdep.LinkOptions())
 	report := diff.Markdown(r, cfg.Base, cfg.Head)
 	if cfg.Out == "" {
 		fmt.Print(report)
@@ -1276,7 +1301,7 @@ func frontierHints(run *query.Run, focusModules map[string]bool) inventory.Hints
 			if pkg := protoPackage(ep.Contract); h.Served[pkg] == "" {
 				missing[pkg] = true
 			}
-		case (d.Transport == "kafka" || d.Transport == "amqp" || d.Transport == "nats") && d.Reason == "":
+		case model.Messaging(d.Transport) && d.Reason == "":
 			for _, k := range strings.Split(d.Key, ", ") { // a partly linked endpoint's unlinked keys only
 				if strings.IndexFunc(k, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0 {
 					topics[k] = true // a name, not an unresolved "*"
@@ -1365,7 +1390,7 @@ func runDeploy(args []string) error {
 	var services []string
 	var ms []*model.Manifest
 	if cfg.Run != "" {
-		if ms, err = readRun(cfg.Run); err != nil {
+		if ms, _, err = readRun(cfg.Run); err != nil {
 			return err
 		}
 		for _, m := range ms {
@@ -1617,12 +1642,14 @@ func runBundle(args []string) error {
 }
 
 // readRun reads the manifests of a run directory or a bundle.
-func readRun(path string) ([]*model.Manifest, error) {
+// readRun reads a run directory or a bundle: its manifests, and its
+// deployment when it has one.
+func readRun(path string) ([]*model.Manifest, *deploy.Deployment, error) {
 	r, err := bundle.Load(path, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return r.Manifests, nil
+	return r.Manifests, r.Deploy, nil
 }
 
 // repoRules returns the rule files that apply to one repository only: its own

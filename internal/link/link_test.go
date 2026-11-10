@@ -102,6 +102,8 @@ func TestPathOnlyHTTP(t *testing.T) {
 		endpoint("health", "http", "server", model.Inbound, "", "/health"),
 		endpoint("any", "http", "server", model.Inbound, "", "*"),
 		endpoint("callback", "http", "server", model.Inbound, "", "POST /undertaker/callback"),
+		endpoint("params", "http", "server", model.Inbound, "", "POST /:account/:queue"), // parameters only
+		endpoint("braces", "http", "server", model.Inbound, "", "POST /{account}/{queue}"),
 	}}
 	var got []string
 	for _, l := range Link([]*model.Manifest{a, b}).Links {
@@ -195,6 +197,71 @@ func TestSharedRedisKeys(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "customers-fraud redis customers:customer:*" {
 		t.Errorf("links = %v, want customers-fraud over the shared Redis key only", got)
+	}
+}
+
+// With the databases a deployment configures, a table is its database's: the
+// data flows from writer to reader, also within one module, readers alone do
+// not link, a table of another database is another table, and a service
+// whose database is unknown shares the name as before.
+func TestSharedTablesByDatabase(t *testing.T) {
+	table := func(id, access string) model.Endpoint {
+		ep := endpoint(id, "sql", "query", model.Outbound, "", "transfers")
+		ep.Access = access
+		return ep
+	}
+	ms := []*model.Manifest{
+		{Service: "payments-grpc", Module: "example.com/payments", Endpoints: []model.Endpoint{table("w", model.Write), table("r", model.Read)}},
+		{Service: "payments-jobs-send", Module: "example.com/payments", Endpoints: []model.Endpoint{table("r", model.Read)}},
+		{Service: "payments-jobs-settle", Module: "example.com/payments", Endpoints: []model.Endpoint{table("r", model.Read)}},
+		{Service: "payments-admin", Module: "example.com/admin", Endpoints: []model.Endpoint{table("u", "")}},     // access unknown
+		{Service: "reports", Module: "example.com/reports", Endpoints: []model.Endpoint{table("w", model.Write)}}, // its own transfers
+		{Service: "legacy", Module: "example.com/legacy", Endpoints: []model.Endpoint{table("r", model.Read)}},    // not deployed
+	}
+	payments := []model.Database{{Instance: "main", Name: "payments"}}
+	dbs := map[string][]model.Database{
+		"payments-grpc": payments, "payments-jobs-send": payments, "payments-jobs-settle": {{Name: "payments"}},
+		"payments-admin": payments, "reports": {{Instance: "main", Name: "reports"}},
+	}
+	var got []string
+	for _, l := range LinkWith(ms, Options{Databases: dbs}).Links {
+		got = append(got, l.From+" -> "+l.To+" "+l.Key+" "+l.Kind+" "+l.Confidence)
+	}
+	sort.Strings(got)
+	want := []string{
+		"legacy -> payments-admin transfers shared-store name-only",
+		"legacy -> payments-grpc transfers shared-store name-only",
+		"legacy -> payments-jobs-send transfers shared-store name-only",
+		"legacy -> payments-jobs-settle transfers shared-store name-only",
+		"legacy -> reports transfers shared-store name-only",
+		"payments-admin -> payments-grpc payments.transfers shared-store same-database",
+		"payments-admin -> payments-jobs-send payments.transfers shared-store same-database",
+		"payments-admin -> payments-jobs-settle payments.transfers shared-store same-database",
+		"payments-grpc -> payments-jobs-send payments.transfers async same-database",
+		"payments-grpc -> payments-jobs-settle payments.transfers async same-database",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("links:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// Files are not shared stores by name: "*/*.pdf" in two services says nothing
+// about the bucket. A beanstalkd tube links its producer and consumer like any
+// queue.
+func TestStorageAndTubes(t *testing.T) {
+	store := endpoint("s", "storage", "query", model.Outbound, "", "*/*.pdf")
+	put := endpoint("p", "beanstalkd", "producer", model.Outbound, "", "scans")
+	reserve := endpoint("r", "beanstalkd", "consumer", model.Inbound, "", "scans")
+	ms := []*model.Manifest{
+		{Service: "contracts", Module: "example.com/contracts", Endpoints: []model.Endpoint{store, put}},
+		{Service: "archive", Module: "example.com/archive", Endpoints: []model.Endpoint{store, reserve}},
+	}
+	var got []string
+	for _, l := range Link(ms).Links {
+		got = append(got, l.From+"-"+l.To+" "+l.Transport+" "+l.Key+" "+l.Kind)
+	}
+	if len(got) != 1 || got[0] != "contracts-archive beanstalkd scans async" {
+		t.Errorf("links = %v, want contracts-archive over the tube only", got)
 	}
 }
 

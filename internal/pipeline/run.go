@@ -31,18 +31,25 @@ type Runner struct {
 	Out    io.Writer // the dry run's script; os.Stdout when nil
 	// Log reports progress (codegraph's log, on standard error).
 	Log func(format string, args ...any)
+	// Version is codegraph's, for the run's header.
+	Version string
+
+	failed []Failure // the current step's
 }
 
 // Result is what one step did.
 type Result struct {
-	Step string
-	Took time.Duration
-	Note string
-	Err  error
+	Step     string
+	Took     time.Duration
+	Note     string
+	Err      error
+	Failures []Failure // items its commands could not do, though it went on
 }
 
 // Run runs the plan's steps in order, stopping at the first that fails, and
-// logs a summary of them.
+// logs a header first and a summary of them last, with every error: a failed
+// step's, with what its command last wrote, and the items a step could not
+// do though it went on (fleet's failed repositories), which fail the run too.
 func (r *Runner) Run(p *Plan) ([]Result, error) {
 	if err := p.checkTrust(); err != nil {
 		return nil, err
@@ -50,6 +57,7 @@ func (r *Runner) Run(p *Plan) ([]Result, error) {
 	if r.DryRun {
 		r.printf("# codegraph run %s (dry run): what it would run, as a shell script\n", p.Name)
 	}
+	r.header(p)
 	start := time.Now()
 	var results []Result
 	var err error
@@ -60,11 +68,12 @@ func (r *Runner) Run(p *Plan) ([]Result, error) {
 		}
 		t := time.Now()
 		res := Result{Step: s.String()}
+		r.failed = nil
 		var o *options.Options
 		if o, err = p.Options(s); err == nil {
 			res.Note, err = r.step(p, s, o)
 		}
-		res.Took, res.Err = time.Since(t), err
+		res.Took, res.Err, res.Failures = time.Since(t), err, r.failed
 		results = append(results, res)
 		if err != nil {
 			err = fmt.Errorf("%s: %w", s.Kind, err)
@@ -73,6 +82,19 @@ func (r *Runner) Run(p *Plan) ([]Result, error) {
 	}
 	if !r.DryRun {
 		r.summary(p, results, time.Since(start))
+	}
+	if err == nil {
+		var steps []string
+		n := 0
+		for _, res := range results {
+			if len(res.Failures) > 0 {
+				n += len(res.Failures)
+				steps = append(steps, stepName(res.Step))
+			}
+		}
+		if n > 0 {
+			err = fmt.Errorf("%d failed in %s (listed above)", n, strings.Join(steps, ", "))
+		}
 	}
 	return results, err
 }
@@ -88,7 +110,21 @@ func (r *Runner) summary(p *Plan, results []Result, took time.Duration) {
 		if res.Err != nil {
 			note = "failed: " + res.Err.Error()
 		}
+		if n := len(res.Failures); n > 0 {
+			note += fmt.Sprintf("; %d failed", n)
+		}
 		r.Log("  %-*s %7s  %s", width, stepName(res.Step), round(res.Took), note)
+		indent := strings.Repeat(" ", width+13)
+		var se *ShellError
+		if errors.As(res.Err, &se) && len(se.Tail) > 0 {
+			r.Log("%s%s ended with:", indent, firstLine(strings.TrimPrefix(res.Step, "exec: ")))
+			for _, line := range tailSummary(se.Tail) {
+				r.Log("%s  %s", indent, line)
+			}
+		}
+		for _, f := range res.Failures {
+			r.Log("%s%s: %s", indent, f.Item, f.Err)
+		}
 	}
 }
 
@@ -154,7 +190,13 @@ func (r *Runner) command(env []string, args ...string) error {
 	r.Log("%s", text)
 	restore := setenv(env)
 	defer restore()
-	return r.Dispatch(args)
+	err := r.Dispatch(args)
+	var partial Partial
+	if errors.As(err, &partial) {
+		r.failed = append(r.failed, partial.Failures()...)
+		return nil
+	}
+	return err
 }
 
 // setenv sets NAME=value pairs and returns what restores them.
@@ -191,14 +233,22 @@ func (r *Runner) shell(dir string, env []string, script string, stdout io.Writer
 		return nil
 	}
 	r.Log("(in %s) %s", dir, firstLine(script))
+	tail := &tailLines{max: maxTail}
 	cmd := exec.Command("sh", "-c", script)
 	cmd.Dir, cmd.Env = dir, append(os.Environ(), env...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, io.MultiWriter(os.Stderr, tail)
 	if stdout != nil {
 		cmd.Stdout = stdout
 	}
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return &ShellError{Err: err, Tail: tail.Lines()}
+	}
+	return nil
 }
+
+// maxTail is how many of its last lines of error output a failed command's
+// summary keeps.
+const maxTail = 30
 
 // action does something to the files that make's recipes did in shell (shown
 // as that shell in a dry run).
@@ -398,8 +448,8 @@ func (r *Runner) deploy(o *options.Options) (string, error) {
 		}
 	}
 	report := filepath.Join(out, "deploy", "deploy.md")
-	if runs { // the explorer again, with what the environment runs
-		if err := r.command(nil, "link", "-format", "html", "-deploy", filepath.Join(out, "deploy", "deploy.json"),
+	if runs { // the link again, with what the environment runs: its databases, and the explorer's production view
+		if err := r.command(nil, "link", "-format", strings.Join(options.List(o.Formats), ","), "-deploy", filepath.Join(out, "deploy", "deploy.json"),
 			"-out", filepath.Join(out, "_system"), filepath.Join(out, "*", "manifest.json")); err != nil {
 			return "", err
 		}

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -270,7 +271,67 @@ func TestRun(t *testing.T) {
 	if results, err := r.Run(p); err == nil || len(results) != 1 || len(ran) != 0 {
 		t.Errorf("a failing step should stop the run: %v, %+v, %q", err, results, ran)
 	}
+
+	// The header says what runs, with what.
+	r.Version = "v9.9.9"
+	logs.Reset()
+	p.Steps = []configfile.Step{{Kind: "exec", Command: "true"}, {Kind: "bundle"}}
+	if _, err := r.Run(p); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"codegraph v9.9.9 (", "  run       checks (a step)", "  profile   other: ", "  steps     exec (true) → bundle",
+		"  output    " + home(run) + ", bundle ", "  settings  focus none, reuse, no chart, 1 check"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("header lacks %q:\n%s", want, logs.String())
+		}
+	}
+
+	// A failed command's last error records: its errors, a summary's object
+	// one key per line.
+	logs.Reset()
+	p.Steps = []configfile.Step{{Kind: "exec", Command: `echo '{"level":"INFO","msg":"pulled from remote","uri":"x"}' >&2
+echo '{"level":"ERROR","msg":"repositories failed","failed":2,"total":9,"errors":{"web":"authentication required","api":"worktree contains unstaged changes"}}' >&2
+exit 1`}}
+	_, err = r.Run(p)
+	var se *ShellError
+	if !errors.As(err, &se) || len(se.Tail) != 2 {
+		t.Fatalf("a failed command's error: %v", err)
+	}
+	for _, want := range []string{"ended with:", "ERROR repositories failed (failed=2, total=9)",
+		"  api: worktree contains unstaged changes", "  web: authentication required"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("summary lacks %q:\n%s", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "INFO pulled") {
+		t.Errorf("the summary keeps the info records:\n%s", logs.String())
+	}
+
+	// Items a step's command could not do: the run goes on, lists them, fails.
+	logs.Reset()
+	r.Dispatch = func(args []string) error {
+		if args[0] == "diff" {
+			return testPartial{{Item: "billing", Err: "load: no Go files"}, {Item: "ledger (its API)", Err: "panic: x"}}
+		}
+		write(t, args[len(args)-1], "bundle")
+		return nil
+	}
+	p.Steps = []configfile.Step{{Kind: "diff"}, {Kind: "bundle"}}
+	results, err = r.Run(p)
+	if err == nil || err.Error() != "2 failed in diff (listed above)" || len(results) != 2 || len(results[0].Failures) != 2 {
+		t.Errorf("partial failures: %v, %+v", err, results)
+	}
+	for _, want := range []string{"; 2 failed", "billing: load: no Go files", "ledger (its API): panic: x"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("summary lacks %q:\n%s", want, logs.String())
+		}
+	}
 }
+
+type testPartial []Failure
+
+func (p testPartial) Error() string       { return "some failed" }
+func (p testPartial) Failures() []Failure { return p }
 
 // config, check and status on a profile and a run.
 func TestReports(t *testing.T) {

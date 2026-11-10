@@ -8,6 +8,8 @@ package model
 import (
 	"fmt"
 	"hash/fnv"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -136,6 +138,7 @@ type Endpoint struct {
 	Kind      string    `json:"kind,omitempty"`     // sync | async; empty = DefaultKind(transport, role)
 	Contract  string    `json:"contract,omitempty"` // gRPC: proto-qualified service (notify.v1.NotifierService)
 	Owner     string    `json:"owner,omitempty"`    // a declared table or key: the repository whose store holds it
+	Access    string    `json:"access,omitempty"`   // a store endpoint: read, write or read-write; empty when unknown
 	Keys      []string  `json:"keys"`               // route, topic, subject, table, gRPC service... ("*" = unresolved part)
 	Message   string    `json:"message,omitempty"`
 	Handler   string    `json:"handler,omitempty"`
@@ -182,6 +185,76 @@ const (
 	MainKey       = "main"
 )
 
+// Transports by what their keys name. Messaging transports carry named topics
+// or queues: producers publish to a name and consumers take from it. Store
+// transports hold named data (tables, cache keys, files) that services share.
+var (
+	messaging = map[string]bool{"kafka": true, "amqp": true, "nats": true, "beanstalkd": true}
+	stores    = map[string]bool{"sql": true, "redis": true, "storage": true}
+)
+
+// Messaging reports whether transport carries named topics or queues.
+func Messaging(transport string) bool { return messaging[transport] }
+
+// MessagingTransports lists the messaging transports, sorted.
+func MessagingTransports() []string { return slices.Sorted(maps.Keys(messaging)) }
+
+// Store reports whether transport holds named data that services share.
+func Store(transport string) bool { return stores[transport] }
+
+// What a store endpoint does with its keys (Endpoint.Access).
+const (
+	Read      = "read"
+	Write     = "write"
+	ReadWrite = "read-write"
+)
+
+// Accesses combines the accesses of several calls into one: read, write, or
+// read-write when both happen; "" when none is known.
+func Accesses(accesses ...string) string {
+	var read, write bool
+	for _, a := range accesses {
+		read = read || a == Read || a == ReadWrite
+		write = write || a == Write || a == ReadWrite
+	}
+	switch {
+	case read && write:
+		return ReadWrite
+	case write:
+		return Write
+	case read:
+		return Read
+	}
+	return ""
+}
+
+// Database is a database a service is configured with: its name, and the
+// instance holding it (the first label of its host; "" when the host is not
+// known, such as a secret). A table name in two databases is two tables.
+type Database struct {
+	Instance string `json:"instance,omitempty"`
+	Name     string `json:"name"`
+}
+
+func (d Database) String() string {
+	if d.Instance == "" {
+		return d.Name
+	}
+	return d.Instance + "/" + d.Name
+}
+
+// Same reports whether d and o can be one database: the same name, on the
+// same instance when both instances are known.
+func (d Database) Same(o Database) bool {
+	return d.Name == o.Name && (d.Instance == "" || o.Instance == "" || d.Instance == o.Instance)
+}
+
+// Writes reports whether an access changes what it touches.
+func Writes(access string) bool { return access == Write || access == ReadWrite }
+
+// Reads reports whether an access reads what it touches.
+func Reads(access string) bool { return access == Read || access == ReadWrite }
+
 // DefaultKind is the interaction kind of an endpoint without an explicit one:
 // producers and consumers are async, request/response roles (clients, servers,
 // queries) are sync, and custom roles fall back on the transport.
@@ -214,6 +287,9 @@ func EndpointID(ep Endpoint) string {
 	}
 	if ep.Owner != "" {
 		fmt.Fprintf(h, "|owner=%s", ep.Owner)
+	}
+	if ep.Access != "" {
+		fmt.Fprintf(h, "|access=%s", ep.Access)
 	}
 	return fmt.Sprintf("ep_%012x", h.Sum64()&0xffffffffffff)
 }
@@ -273,10 +349,24 @@ type System struct {
 	Dangling []Dangling      `json:"dangling"`
 	Journeys []SystemJourney `json:"journeys,omitempty"`
 
+	// Schedules maps "service|journey key" to the schedule a deployment runs
+	// that journey on (a CronJob's main, or the CLI command it runs).
+	Schedules map[string]string `json:"schedules,omitempty"`
+
 	// Continuations maps "service|outbound endpoint ID" to where that endpoint
 	// leads, one level at a time, for renderers that expand journeys on
 	// demand. Not serialised: Journeys carries the chains, expanded.
 	Continuations map[string][]Continuation `json:"-"`
+}
+
+// Job is a program a deployment runs on a schedule (a CronJob's main
+// container): its service, its schedule and the command it runs, whose words
+// name a CLI command when the binary has several.
+type Job struct {
+	Service  string   `json:"service"`
+	Name     string   `json:"name"`
+	Schedule string   `json:"schedule"`
+	Command  []string `json:"command,omitempty"`
 }
 
 // Continuation is where an outbound endpoint leads: a link into another
@@ -347,6 +437,7 @@ type SystemJourney struct {
 	Key        string `json:"key"`
 	Kind       string `json:"kind"`
 	Handler    string `json:"handler,omitempty"`
+	Schedule   string `json:"schedule,omitempty"` // when a deployment runs it on a schedule
 	Hops       []Hop  `json:"hops"`
 }
 
@@ -359,6 +450,7 @@ type Hop struct {
 	Transport    string `json:"transport"`
 	Role         string `json:"role"`
 	Key          string `json:"key"`
+	Access       string `json:"access,omitempty"` // a store: read, write or read-write
 	Message      string `json:"message,omitempty"`
 	Kind         string `json:"kind"`
 	Background   bool   `json:"background,omitempty"`
@@ -367,6 +459,7 @@ type Hop struct {
 	ToEndpoint   string `json:"toEndpoint,omitempty"`
 	Journey      string `json:"journey,omitempty"` // key of the target journey
 	Handler      string `json:"handler,omitempty"`
+	Schedule     string `json:"schedule,omitempty"` // the target journey's, when it runs on a schedule
 	Cycle        bool   `json:"cycle,omitempty"`
 	Repeated     bool   `json:"repeated,omitempty"` // the journey was followed earlier in this chain; not listed again
 	Truncated    bool   `json:"truncated,omitempty"`

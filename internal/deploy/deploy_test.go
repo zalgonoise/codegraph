@@ -489,3 +489,36 @@ func TestMatchBuilders(t *testing.T) {
 		t.Errorf("matches:\n got %q\nwant %q", got, want)
 	}
 }
+
+// A database is a name variable with the host variable of the same prefix,
+// family and suffix; the instance is the host's first label.
+func TestDatabases(t *testing.T) {
+	env := map[string]string{
+		"DB_HOST": "orders-main.abc123.eu-west-1.rds.example.com", "DB_NAME": "orders",
+		"LEGACY_DATABASE_HOST": "core-db:3306", "LEGACY_DATABASE_NAME": "core",
+		"DB_HOST_REPORTS": "10.0.0.7", "DB_NAME_REPORTS": "reports",
+		"MARIADB_DATABASE": "wallets", // its host is a secret
+		"PGHOST":           "pg", "PGDATABASE": "ledger",
+		"POSTGRES_DB":             "audit",
+		"ARCHIVE_ATHENA_DATABASE": "history", // not a database server
+		"REDIS_DB":                "2",
+		"DB_PORT":                 "3306",
+		"SESSIONS_DB_NAME":        Secret, // masked
+	}
+	var got []string
+	for _, db := range databasesOf(env) {
+		got = append(got, db.String())
+	}
+	want := []string{"10.0.0.7/reports", "audit", "core-db/core", "orders-main/orders", "pg/ledger", "wallets"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("databasesOf = %v, want %v", got, want)
+	}
+	d := &Deployment{Workloads: []Workload{
+		{Containers: []Container{{Service: "orders", Env: map[string]string{"DB_HOST": "orders-main.x", "DB_NAME": "orders"}}}},
+		{Kind: "CronJob", Containers: []Container{{Service: "orders", Databases: []model.Database{{Instance: "orders-main", Name: "orders"}}}}},
+		{Containers: []Container{{Env: map[string]string{"DB_NAME": "unmatched"}}}},
+	}}
+	if dbs := d.Databases(); len(dbs) != 1 || len(dbs["orders"]) != 1 || dbs["orders"][0].String() != "orders-main/orders" {
+		t.Errorf("Databases = %v, want orders on orders-main/orders once", dbs)
+	}
+}

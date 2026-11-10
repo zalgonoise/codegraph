@@ -37,9 +37,10 @@ type Run struct {
 	services  map[string]*model.Manifest
 	endpoints map[string]model.Endpoint // service|endpoint ID
 	journeys  []journey
-	byEntry   map[string][]int  // service|entrypoint -> journeys starting there
-	usedBy    map[string][]int  // service|outbound endpoint -> journeys using it
-	dangling  map[string]string // service|endpoint ID -> reason ("" for none)
+	byEntry   map[string][]int            // service|entrypoint -> journeys starting there
+	usedBy    map[string][]int            // service|outbound endpoint -> journeys using it
+	dangling  map[string]string           // service|endpoint ID -> reason ("" for none)
+	dbs       map[string][]model.Database // the deployment's databases by service, once asked for
 
 	// Analysed libraries: their symbols' journeys, and the journeys calling
 	// each.
@@ -53,6 +54,17 @@ type journey struct {
 	j       model.Journey
 }
 
+// databases returns the databases the deployment configures service with.
+func (r *Run) databases(service string) []model.Database {
+	if r.dbs == nil {
+		r.dbs = r.Deploy.Databases()
+		if r.dbs == nil {
+			r.dbs = map[string][]model.Database{}
+		}
+	}
+	return r.dbs[service]
+}
+
 // Load reads a run, a directory (<dir>/<service>/manifest.json, with its
 // deployment and inventory) or a bundle (codegraph bundle), and links the
 // services.
@@ -61,7 +73,7 @@ func Load(path string) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := New(path, src.Manifests, link.Link(src.Manifests))
+	r := New(path, src.Manifests, link.LinkWith(src.Manifests, src.Deploy.LinkOptions()))
 	r.Deploy, r.Inventory, r.Bundle = src.Deploy, src.Inventory, src.Meta
 	if src.Meta == nil {
 		r.Explorer = explorerPage(path)
@@ -201,7 +213,7 @@ func (r *Run) reachable(start, depth int) (dist map[int]int, via map[int]model.L
 }
 
 // transports are the first word a journey key may be qualified with.
-var transports = map[string]bool{"http": true, "grpc": true, "kafka": true, "amqp": true, "nats": true, "redis": true, "sql": true, "cli": true, model.APITransport: true, model.MainTransport: true}
+var transports = map[string]bool{"http": true, "grpc": true, "kafka": true, "amqp": true, "nats": true, "beanstalkd": true, "redis": true, "sql": true, "storage": true, "cli": true, model.APITransport: true, model.MainTransport: true}
 
 // keyEndpoints lists the endpoints with key exactly, or, when none has it,
 // with keys containing it (case-insensitive), as service|endpoint IDs.

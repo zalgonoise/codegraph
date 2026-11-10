@@ -249,6 +249,9 @@ func (r *Resolver) handlersFromField(owner types.Type, idx int, methods []string
 // handlersFromCall follows a handler factory: into the results of a module
 // function, or, for library middleware (http.StripPrefix(p, h),
 // otelhttp.NewHandler(h, ...)), into the arguments of the handler's own type.
+// A library adapter taking the handler as another interface (queue.Adapt(h),
+// a legacy Work(id, body) handler as a Work(job) one) is followed into the
+// arguments whose interface has one of the methods the registration runs.
 func (r *Resolver) handlersFromCall(c *ssa.CallCommon, index int, result types.Type, methods []string, depth int, seen map[ssa.Value]bool, out *[]Root) {
 	if callee := c.StaticCallee(); callee != nil && r.modulePkgs[symbols.PkgPath(callee)] {
 		fc := &factoryCall{callee: callee, common: c}
@@ -262,11 +265,35 @@ func (r *Resolver) handlersFromCall(c *ssa.CallCommon, index int, result types.T
 		}
 		return
 	}
+	wraps := false
 	for _, a := range Args(c) {
 		if types.Identical(a.Type(), result) {
+			wraps = true
 			r.handlerFuncs(a, methods, depth+1, seen, out, nil)
 		}
 	}
+	if wraps {
+		return
+	}
+	for _, a := range Args(c) {
+		if hasMethod(a.Type(), methods) {
+			r.handlerFuncs(a, methods, depth+1, seen, out, nil)
+		}
+	}
+}
+
+// hasMethod reports whether t is an interface with one of the named methods.
+func hasMethod(t types.Type, names []string) bool {
+	it, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	for i := 0; i < it.NumMethods(); i++ {
+		if containsName(names, it.Method(i).Name()) {
+			return true
+		}
+	}
+	return false
 }
 
 // boundMethod resolves a method value (h.List). DeleteSyntheticNodes removes

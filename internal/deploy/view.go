@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/zalgonoise/codegraph/internal/model"
 )
 
 // ReadFile reads a deploy.json written by codegraph deploy.
@@ -43,15 +45,18 @@ type Addresses struct {
 
 // WorkloadView is one workload running the service.
 type WorkloadView struct {
-	Name     string            `json:"name"`
-	Kind     string            `json:"kind"`
-	Schedule string            `json:"schedule,omitempty"`
-	Replicas *int              `json:"replicas,omitempty"`
-	Command  string            `json:"command,omitempty"`
-	Hosts    []string          `json:"hosts,omitempty"`   // Kubernetes Services naming it, with their ports
-	Mocks    []string          `json:"mocks,omitempty"`   // *MOCK* variables set to true
-	Env      map[string]string `json:"env,omitempty"`     // its configuration; secrets are never read
-	Secrets  []string          `json:"secrets,omitempty"` // the variables (or whole Secrets) taken from Secrets, by name
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	Schedule string   `json:"schedule,omitempty"`
+	Replicas *int     `json:"replicas,omitempty"`
+	Command  string   `json:"command,omitempty"`
+	Hosts    []string `json:"hosts,omitempty"` // Kubernetes Services naming it, with their ports
+	Mocks    []string `json:"mocks,omitempty"` // *MOCK* variables set to true
+	// Databases are those its variables name: a service with one database has
+	// its tables there.
+	Databases []model.Database  `json:"databases,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`     // its configuration; secrets are never read
+	Secrets   []string          `json:"secrets,omitempty"` // the variables (or whole Secrets) taken from Secrets, by name
 }
 
 // View describes what d runs of service.
@@ -72,7 +77,7 @@ func (d *Deployment) View(service string) *ServiceView {
 				continue
 			}
 			wv := WorkloadView{Name: w.Name, Kind: w.Kind, Schedule: w.Schedule, Replicas: w.Replicas,
-				Command: Command(c), Env: c.Env, Secrets: c.Secrets}
+				Command: Command(c), Env: c.Env, Secrets: c.Secrets, Databases: c.DatabasesOf()}
 			if len(w.Mains()) > 1 {
 				wv.Name += " [" + c.Name + "]"
 			}

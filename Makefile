@@ -135,6 +135,8 @@ samples: ## Analyse the bundled samples and link them
 	$(CODEGRAPH) analyze -dir testdata/tool -entry ./cmd/... -out $(SAMPLES_OUT)
 	$(CODEGRAPH) analyze -dir testdata/mailer -library -out $(SAMPLES_OUT)
 	$(CODEGRAPH) analyze -dir testdata/pipeline -out $(SAMPLES_OUT)
+	$(CODEGRAPH) analyze -dir testdata/queue -entry ./cmd/... -rules testdata/rules/inhouse.json -out $(SAMPLES_OUT)
+	$(CODEGRAPH) analyze -dir testdata/payouts -entry ./cmd/... -out $(SAMPLES_OUT)
 	$(CODEGRAPH) link -out $(SAMPLES_OUT)/_system $(SAMPLES_OUT)/*/manifest.json
 
 test: ## gofmt, go vet and the tests (with a profile, its rule files are checked too)

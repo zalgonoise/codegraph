@@ -98,7 +98,7 @@ func Service(m *model.Manifest, opts ServiceOptions) *Graph {
 		switch {
 		case ep.Direction == model.Inbound:
 			group, class = "inbound", "inbound"
-		case ep.Transport == "sql" || ep.Role == "connect":
+		case model.Store(ep.Transport) || ep.Role == "connect":
 			group, class, shape = "infra", "store", ShapeCylinder
 		}
 		key := "e:" + ep.ID
@@ -221,7 +221,11 @@ func endpointLabel(ep model.Endpoint) string {
 	if len(keys) > 3 {
 		keys, more = keys[:3], fmt.Sprintf("\n(+%d more)", len(ep.Keys)-3)
 	}
-	label := strings.ToUpper(ep.Transport) + " " + ep.Role + "\n" + strings.Join(keys, "\n") + more
+	role := ep.Role
+	if ep.Access != "" { // a store: what it does is clearer than "query"
+		role = ep.Access
+	}
+	label := strings.ToUpper(ep.Transport) + " " + role + "\n" + strings.Join(keys, "\n") + more
 	if ep.Message != "" {
 		label += "\nmsg: " + ep.Message
 	}

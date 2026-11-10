@@ -15,6 +15,8 @@ var messaging = []MessagingLibrary{
 	{"confluent-kafka-go", "kafka", "github.com/confluentinc/confluent-kafka-go"},
 	{"amqp091-go", "rabbitmq", "github.com/rabbitmq/amqp091-go"},
 	{"streadway/amqp", "rabbitmq", "github.com/streadway/amqp"},
+	{"kr/beanstalk", "beanstalkd", "github.com/kr/beanstalk"},
+	{"mikegleasonjr/workers", "beanstalkd", "github.com/mikegleasonjr/workers"},
 }
 
 // Dependents lists the repositories requiring module (directly), with the
@@ -131,9 +133,10 @@ func Report(inv *Inventory) string {
 		var names []string
 		for _, u := range users {
 			names = append(names, u.Path)
-			if lib.Transport == "kafka" {
+			switch lib.Transport {
+			case "kafka":
 				kafka[u.Path] = true
-			} else {
+			case "rabbitmq":
 				rabbit[u.Path] = true
 			}
 		}

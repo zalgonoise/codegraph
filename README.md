@@ -36,8 +36,8 @@ For each `main` package (a service), and then across services:
    never show up. Components (packages) are grouped by layer with their **contracts** (declared interfaces), the
    **implementations** in use at runtime, the calls between components, and the dependency-injection **bindings**.
 3. **What does it consume and produce?** HTTP routes and clients, gRPC servers and calls, Kafka, NATS, RabbitMQ (AMQP)
-   and Redis topics, queues and keys, SQL tables, CLI commands, with message types and handlers where they can be
-   resolved.
+   and beanstalkd topics, queues and tubes, Redis keys, SQL tables, files (through in-house rules), CLI commands, with
+   message types and handlers where they can be resolved.
 4. **What does each entry point do?** Every inbound endpoint (an HTTP route, a gRPC method, a consumed topic, a CLI
    command) starts a **journey**: the functions and components its handler reaches, the goroutines it starts, the
    exported API of other modules it calls, and the outbound endpoints (other services, brokers, stores) it uses, in
@@ -97,7 +97,8 @@ code through the `go` command. The rest of this guide runs
 from a clone, with `go run ./cmd/codegraph` or the Makefile; with the binary installed, `codegraph` does the same.
 
 **3. Try the samples.** `testdata/` holds small services (an HTTP API with a Kafka producer, a gRPC service, consumers
-of Kafka and RabbitMQ, a chi and iris gateway, CLI tools, a pipeline) and a library, all offline.
+of Kafka and RabbitMQ, a chi and iris gateway, CLI tools, a pipeline, a beanstalkd producer and worker) and a library,
+all offline.
 
 ```sh
 make samples                         # analyse them into tmp/samples and link them
@@ -292,8 +293,14 @@ and `codegraph run -dry-run` prints what a run would do, as a shell script, runn
 
 **3. Run it.** `codegraph` runs the default pipeline, `codegraph run <pipeline>` another, and `codegraph run graph`
 one step with the profile's settings (`inventory`, `graph`, `deploy`, `checks`, `diff`, `bundle`, and `org` for graph,
-inventory, graph). Each run ends with a summary: every step's time and result. `codegraph status` tells how current the
-last run is: when and by which codegraph it was made, and which repositories have new commits since.
+inventory, graph). Each run starts with a header (codegraph's version, the pipeline and its file, the profile, the
+steps, the repositories it reads, what it writes, and the settings that decide what it does; a dry run's script has
+it as comments) and ends with a summary: every step's time and result, and every error. A step that fails stops the
+run; the summary shows what its command last wrote to standard error, its error and warning log records rendered
+one per line, a record mapping items to errors (gitpull's `repositories failed`) one item per line. Repositories the
+graph step could not analyse don't stop it: they are listed with their errors, and the run exits non-zero.
+`codegraph status` tells how current the last run is: when and by which codegraph it was made, and which repositories
+have new commits since.
 
 - **Where it is found:** `-config <file>` (`none` for none), else `$CODEGRAPH_CONFIG`, else `.codegraph.yaml` in the
   current directory, else in the home directory. Paths in it are relative to it; `~` is the home directory.
@@ -330,8 +337,8 @@ at the root), and a repository without any `main` is a library, skipped before l
 such, or, with `-libraries` (`LIBRARIES=1` for `make graph`), analysed through its exported API (see
 [Libraries](#libraries)). `-api` (`API=1`) analyses every repository's API: those without a `main` as libraries, and
 those with mains also as a library named `<name>-api`, next to their programs. Example and demo directories don't count as mains. Main packages matching `-skip-mains`
-(default: migration, rollback and seed tools, and anything under `examples/` or `demo/`) are left out, a repository that fails to load is reported and skipped, and
-the manifests are linked into `<out>/_system`. Rules for one repository only (its own dispatch
+(default: migration, rollback and seed tools, and anything under `examples/` or `demo/`) are left out, a repository that fails to load is reported and skipped (fleet ends listing each with its error, and
+exits non-zero), and the manifests are linked into `<out>/_system`. Rules for one repository only (its own dispatch
 code) come from its `codegraph-rules.json`, if it has one, and from `-repo-rules <dir>`, which holds
 `<module name>.json` files kept outside the repositories (`rules/repos/orders.json` for
 `example.com/orders/v2`); they take precedence over the shared rules. Loading needs every dependency in the module cache;
@@ -474,9 +481,11 @@ name. `-service` (single main package) or `//codegraph:service` override it.
 Built-in rules cover `net/http` (server, `ServeMux`, `Server.Addr`, clients, `NewRequest*`), chi,
 gin, echo, gorilla/mux, iris v12, gRPC generated code (`RegisterXServer`, `NewXClient`, RPCs on an
 `XServiceClient` keyed `XService/Method`, `grpc.NewClient/Dial`), segmentio/kafka-go, sarama,
-confluent-kafka-go, nats.go, amqp091/streadway, `database/sql`, pgx, gorm (tables from
+confluent-kafka-go, nats.go, amqp091/streadway, beanstalkd (kr/beanstalk's `Tube.Put` keyed by the tube's `Name`
+and `NewTubeSet` reserved in the caller's loop, mikegleasonjr/workers' `WorkMux.Handle(tube, handler)`), `database/sql`,
+pgx, gorm (tables from
 `Table(name)`, `Raw`/`Exec` SQL or the model's `TableName()`; the connection from the dialector's
-`Name()`), go-redis (publish/subscribe, and key operations such as `Get`/`Set`/`HSet`/`Del` keyed by
+`Name()`; each call reads, writes or both, see below), go-redis (publish/subscribe, and key operations such as `Get`/`Set`/`HSet`/`Del` keyed by
 key pattern, e.g. `customers:profile:*`), grpc-gateway (the routes the generated code registers on a
 `runtime.ServeMux`, their paths decoded from the generated patterns' op codes, and `HandlePath`), and CLI commands: cobra (the subcommands given to `AddCommand` and the root
 run by `Execute`, named by the first word of `Use`; a command without `Run` or `RunE` only groups others and is left
@@ -513,7 +522,10 @@ a `Table`) and:
   roles (client, server, query, …) are sync. NATS `Request`/`RequestWithContext` are `sync`.
 - `handlerArgs`: the argument(s) holding the handler of an inbound endpoint; it becomes the root of
   the endpoint's journey. `handlerMethods` limits which methods of an interface-typed handler count
-  (sarama: `ConsumeClaim`; default all exported methods, one journey per method for gRPC).
+  (sarama: `ConsumeClaim`; default all exported methods, one journey per method for gRPC). A handler
+  wrapped by a library is followed into what it wraps: middleware taking the handler's own type
+  (`otelhttp.NewHandler(h, …)`), and adapters taking it as another interface with one of those methods
+  (`queue.AdaptHandler(h)`, a `Work(id, body)` handler run as a `Work(job)` one).
 - `handlerFields`: like `keyFields`, for a handler held in a config argument
   (`rabbitmq.NewConsumer(ConsumerConfig{Handler: h})`).
 - `fallback`: the rule describes a consumer's whole subscription (its queue list). Keys that another
@@ -527,6 +539,16 @@ a `Table`) and:
   argument, with the `keyFields` and `handlerFields` naming that argument read on each element
   (cobra's `AddCommand(cmds ...*Command)`, each with its `Use` and `RunE`).
 - `requireHandler`: drop an inbound endpoint whose handler resolves to no function.
+- `access`, `accessFuncs`, `chain`: what a store call does with its keys (`read`, `write` or `read-write`), shown
+  with the endpoint (`sql write orders`) and in `who` answers (written by, read by). `access` is fixed, or
+  `statement`: from the SQL of the key arguments, table by table (a `SELECT` reads; `INSERT INTO a SELECT … FROM b`
+  writes `a` and reads `b`; `UPDATE` and the first `DELETE FROM` write their table; a `WITH` takes the verb after it).
+  `accessFuncs` maps the called function's name to its access (`{"Create": "write", "Find": "read"}`). With
+  `chain`, a call it does not map (gorm's `Model(&x)` or `Table(name)`) takes the access of the calls it maps
+  among those made on its result: through steps that return the same builder (`Where`, `Order`), helpers it is
+  passed to, and the callers of a function returning it; a builder passed as a value (`Where("id IN (?)", q)`) is
+  a subquery, read. The built-in `database/sql`, pgx and gorm rules have them; the access joins the endpoint's ID, so
+  a table read and written by one package is two endpoints.
 
 Rules can target interfaces: an invoke on `events.Publisher` matches `recv: "Publisher"` directly,
 and concrete callees found by the call graph are tried too.
@@ -550,9 +572,9 @@ trailing slash is dropped.
 
 ### In-house libraries
 
-Organisations often wrap Kafka, RabbitMQ or Redis in libraries of their own; rules describe their APIs, kept in the
-organisation's [profile](#profiles) and passed with `-rules`. `testdata/rules/inhouse.json` is an example, for the
-samples' in-house style libraries (`testdata/stubs/kafkabus`, `rabbitbus`, `kvcache`):
+Organisations often wrap Kafka, RabbitMQ, beanstalkd or Redis in libraries of their own; rules describe their APIs,
+kept in the organisation's [profile](#profiles) and passed with `-rules`. `testdata/rules/inhouse.json` is an example,
+for the samples' in-house style libraries (`testdata/stubs/kafkabus`, `rabbitbus`, `kvcache`, `tubequeue`):
 
 | Rule | Call | Endpoint |
 |---|---|---|
@@ -563,6 +585,12 @@ samples' in-house style libraries (`testdata/stubs/kafkabus`, `rabbitbus`, `kvca
 | `rabbitbus-new-consumer` | `rabbitmq.NewConsumer(ConsumerConfig{Handler, Queues})` | RabbitMQ consumer of `Queues[].PriorityQueue` with `Handler` as root, for the queues no mux registers (`fallback`) |
 | `rabbitbus-broker-consume` | `ports.BrokerRepository` / `rabbitmq.RabbitMQ.Consume(ctx, queue, handler)` | RabbitMQ consumer; `""` is the queue given to `rabbitmq.New(ctx, &Config{PriorityQueue})` (`keyDefault`) |
 | `rabbitbus-publish` | `ports.Publisher` / `BrokerRepository.Publish(ctx, queue, …)` | RabbitMQ producer keyed by queue (`""` as above) |
+| `tubequeue-put` | `Client.Put(ctx, tube, body)` | beanstalkd producer keyed by tube |
+| `tubequeue-watch` | `Client.WatchTube(ctx, tube, tubequeue.AdaptHandler(h))` | beanstalkd consumer; the root is `h`'s `Work`, through the library's adapter |
+
+Two transports exist only for such rules. `storage` is files in a bucket or on a server (an in-house S3 or SFTP
+client: role `query`, keyed by file name, such as `reports/*.pdf`); a file name is not linked by itself, as it says
+nothing of the bucket. `beanstalkd` tubes link like any queue.
 
 A service that dispatches queues with its own router instead of a library's mux needs a rule for that router, kept
 per repository (`-repo-rules <dir>`, a `<module name>.json` per repository):
@@ -624,6 +652,19 @@ calls into the called method's journey) with cycle and depth guards, and renders
 diagram, with stores and unmatched endpoints as their own participants. Within one chain a journey is followed once:
 a second route to it (a→b→d and a→c→d) is marked `repeated` rather than listed again, unless it arrives at a
 shallower depth and can be followed further. Without that, chains grow exponentially with depth.
+
+**Hand-offs through tables and schedules.** With a deployment (`link -deploy`, or a run that has one), work handed
+over through a table is followed too. Each CronJob's schedule goes on the journey it runs: the CLI command a word of
+its command names (`/usr/bin/app send-payouts` → `cli send-payouts`), else its main journey (`schedule` on the
+system journey and on hops into it; `journey` answers say "runs on schedule"). A journey writing a table of its
+service's database (see "How linking works") continues into the journeys reading that table on their own, in the
+same database: those run on a schedule, the main journeys of programs nothing else starts (a worker's loop), and
+other main journeys' reads from their goroutines. A journey reading it because a request asks (a route, a method, a
+consumer) is not continued into: the write does not start it. The hop is async, keyed `<database>.<table>`,
+confidence `same-database`, and may stay in the service (a method writes, its own worker reads). A chain takes one
+such hand-off: past it, writes stay stores, as jobs writing and reading the same tables (a transitions log) would
+otherwise lead into each other at every step; each job's own journey shows the hand-offs it makes. A job writing
+what it reads itself is not a hand-off.
 
 ## Libraries
 
@@ -756,7 +797,8 @@ Endpoints are written as codegraph detects them: gRPC servers keyed by service w
 calls `Service/Method`, HTTP routes `METHOD /path/{param}`, HTTP calls `METHOD http://host:port/path`, topics, queues,
 tables and Redis key patterns, with `*` for what is unknown. An inbound endpoint lists what it uses as `"<transport>
 <key>"` of the file's outbound endpoints (`"*"` for all of them): `reaches` gives it one journey, and `methods` one
-journey per gRPC method. Unknown fields are rejected. A declared service is only as precise as its description, and
+journey per gRPC method. A table, key or file can say what the service does with it (`"access": "write"`: `read`,
+`write` or `read-write`). Unknown fields are rejected. A declared service is only as precise as its description, and
 its `commit` records when it was read.
 
 ## Deployments: what an environment runs
@@ -786,8 +828,17 @@ go run ./cmd/codegraph deploy -rendered objects.yaml …   # objects rendered al
   below `bin/` (`/bin/service/grpc/v1` → `notifier-service-grpc-v1`, `/usr/bin/grpc_app` → `orders-grpc`) or a
   subcommand, else the repository's only main, else the main named like the repository for a generic binary
   (`app grpc`). What cannot be told is listed, not guessed.
-- **The explorer** (`codegraph link -deploy deploy.json`, run by `make deploy`): the same, per service page; see
-  "Diagrams on demand" above.
+- **Databases:** a container's variables name its databases: each variable naming one (`DB_NAME`, `DATABASE_NAME`,
+  `DB_DATABASE`, `MYSQL_DATABASE`, `MARIADB_DATABASE`, `POSTGRES_DB`, `PGDATABASE`, with any prefix or suffix:
+  `LEGACY_DATABASE_NAME`, `DB_NAME_REPORTS`), with the host variable of the same prefix and suffix (`DB_HOST`,
+  `DB_HOST_REPORTS`), whose first label names the instance (`orders-main.abc.rds.example.com` → `orders-main`).
+  A name from a secret is unknown; a host from a secret leaves the instance unknown. A service whose containers name
+  exactly one database has its tables there when linking with the deployment (see "How linking works"); with
+  several, its tables keep their names alone. `query service` lists each workload's databases, `who <table>` the
+  database of each user, `context.md` each service's.
+- **The explorer and the links** (`codegraph link -deploy deploy.json`, run by `make deploy` and after the graph
+  step's deployment): the same, per service page, and the links through the databases; see "Diagrams on demand"
+  above.
 - **`deploy.md`:** the analysed services and their workloads (command, schedule, hosts), the analysed services not
   deployed, the workloads whose main could not be told, repositories running without an analysed service (with their
   languages), workloads matching no repository, mocks switched on (`*MOCK*=true`), and the public routes.
@@ -1007,8 +1058,9 @@ Outbound `client`/`producer` endpoints are matched against inbound `server`/`con
 other services on the same transport. HTTP requires the URL host to be the target's name, an alias
 or `tags["host"]` (an unresolved host still matches on the path and is marked `path-only`); routes
 support `{id}`, `{rest...}`, `:id` and `*`; a path-only client must have at least one literal path
-segment and never links to a catch-all or unresolved route (generic clients for external APIs would
-otherwise reach every `/metrics` and `/health`). gRPC calls keyed `Service/Method` link to the
+segment and never links to a catch-all, unresolved or parameters-only route such as `/{id}` or
+`/:account/:queue` (generic clients for external APIs would otherwise reach every `/metrics` and `/health`, and any
+path of the same length). gRPC calls keyed `Service/Method` link to the
 server registered for `Service`; every gRPC endpoint also records its `contract`, the
 proto-qualified service from the generated `<Service>_ServiceDesc` (`notify.v1.NotifierService`), and when
 both sides know it they must agree, which tells API versions apart. A grpc-gateway route forwards through
@@ -1016,7 +1068,13 @@ the generated client (a call in a `*.pb.gw.go` file): when that reaches the serv
 continues into the method's journey (confidence `gateway`), though no link joins a service to itself. A link between endpoints with
 several keys lists every matching key. `*` in any key is a wildcard for the part the resolver could
 not determine (confidence `pattern`). A link is `sync` or `async` from the outbound endpoint's kind.
-SQL tables and Redis key patterns used by several services become `shared-store` links when the
+With a deployment (`link -deploy`, `query` and `diff` on a run that has one), a table of a service configured with
+exactly one database is that database's table: services whose databases differ do not share it, and those of one
+database do, also mains of one module (a server and the jobs of its repository). When both say what they do with it
+(the access), the data flows from writer to reader: an `async` link keyed `<database>.<table>` (confidence
+`same-database`) from each service writing it to each other reading it, none between readers alone; when either
+does not say, a `shared-store` link, `same-database`. Otherwise,
+SQL tables and Redis key patterns (not file names, transport `storage`) used by several services become `shared-store` links when the
 services come from different modules (confidence `name-only`: the same name may still be two
 databases or Redis instances; a key with no letter or digit, such as `*:*:*`, is never shared); mains of one module sharing their tables is not reported, and the
 system diagram groups them per module. Anything unmatched is listed as dangling, with a reason when

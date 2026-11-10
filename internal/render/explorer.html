@@ -9,7 +9,8 @@
   --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0; --hover: #f0f0ec;
   --accent: #2f5bd3; --focus: #2f5bd3; --chip: #efefeb; --warn: #9a5b00;
   --t-http: #2563eb; --t-grpc: #7c3aed; --t-kafka: #c2410c; --t-amqp: #be185d; --t-nats: #0f766e;
-  --t-sql: #15803d; --t-redis: #b91c1c; --t-cli: #4d7c0f; --t-go: #0e7490; --t-main: #475569; --t-other: #57534e;
+  --t-beanstalkd: #a16207;
+  --t-sql: #15803d; --t-redis: #b91c1c; --t-storage: #a21caf; --t-cli: #4d7c0f; --t-go: #0e7490; --t-main: #475569; --t-other: #57534e;
   --svc-l: 40%; --svc-s: 55%;
   color-scheme: light;
 }
@@ -18,7 +19,8 @@
     --bg: #141416; --panel: #1c1c1f; --ink: #ececee; --muted: #9b9ba3; --line: #2e2e33; --hover: #26262b;
     --accent: #8aa8ff; --focus: #8aa8ff; --chip: #2a2a30; --warn: #f0b35a;
     --t-http: #7aa7ff; --t-grpc: #b69cff; --t-kafka: #ff9a62; --t-amqp: #ff7cb8; --t-nats: #4fd1c5;
-    --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
+    --t-beanstalkd: #f5c451;
+    --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-storage: #ee9cf6; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
     --svc-l: 72%; --svc-s: 60%;
     color-scheme: dark;
   }
@@ -27,7 +29,8 @@
   --bg: #141416; --panel: #1c1c1f; --ink: #ececee; --muted: #9b9ba3; --line: #2e2e33; --hover: #26262b;
   --accent: #8aa8ff; --focus: #8aa8ff; --chip: #2a2a30; --warn: #f0b35a;
   --t-http: #7aa7ff; --t-grpc: #b69cff; --t-kafka: #ff9a62; --t-amqp: #ff7cb8; --t-nats: #4fd1c5;
-  --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
+  --t-beanstalkd: #f5c451;
+    --t-sql: #5fd18a; --t-redis: #ff7b7b; --t-storage: #ee9cf6; --t-cli: #a3e635; --t-go: #5fd4e8; --t-main: #b8c2d0; --t-other: #b5b0aa;
   --svc-l: 72%; --svc-s: 60%;
   color-scheme: dark;
 }
@@ -96,8 +99,8 @@ main h3 { font-size: 14px; margin: 26px 0 8px; text-transform: uppercase; letter
   color: var(--tc); border: 1px solid var(--tc); line-height: 17px; flex: none;
 }
 .t-http { --tc: var(--t-http); } .t-grpc { --tc: var(--t-grpc); } .t-kafka { --tc: var(--t-kafka); }
-.t-amqp { --tc: var(--t-amqp); } .t-nats { --tc: var(--t-nats); } .t-sql { --tc: var(--t-sql); }
-.t-redis { --tc: var(--t-redis); } .t-cli { --tc: var(--t-cli); } .t-go { --tc: var(--t-go); } .t-main { --tc: var(--t-main); } .t-other { --tc: var(--t-other); }
+.t-amqp { --tc: var(--t-amqp); } .t-nats { --tc: var(--t-nats); } .t-beanstalkd { --tc: var(--t-beanstalkd); }
+.t-sql { --tc: var(--t-sql); } .t-redis { --tc: var(--t-redis); } .t-storage { --tc: var(--t-storage); } .t-cli { --tc: var(--t-cli); } .t-go { --tc: var(--t-go); } .t-main { --tc: var(--t-main); } .t-other { --tc: var(--t-other); }
 .pill {
   display: inline-block; padding: 0 8px; border-radius: 999px; font-weight: 600; font-size: 12.5px;
   color: hsl(var(--h) var(--svc-s) var(--svc-l)); border: 1px solid hsl(var(--h) var(--svc-s) var(--svc-l) / .45);
@@ -198,9 +201,10 @@ D.services = D.services || []; D.journeys = D.journeys || []; D.links = D.links 
 D.endpoints = D.endpoints || {}; D.next = D.next || {}; D.dangling = D.dangling || {}; D.partial = D.partial || {};
 const J = D.journeys;
 const MAX_DEPTH = 6, MAX_EXPAND = 1500;
-const TRANSPORTS = ["http", "grpc", "kafka", "amqp", "nats", "sql", "redis", "cli", "go", "main"];
-const TNAME = { http: "HTTP", grpc: "gRPC", kafka: "Kafka", amqp: "RabbitMQ", nats: "NATS", sql: "SQL", redis: "Redis", cli: "CLI", go: "Go API", main: "Main" };
-const MESSAGING = new Set(["kafka", "amqp", "nats"]);
+const TRANSPORTS = ["http", "grpc", "kafka", "amqp", "nats", "beanstalkd", "sql", "redis", "storage", "cli", "go", "main"];
+const TNAME = { http: "HTTP", grpc: "gRPC", kafka: "Kafka", amqp: "RabbitMQ", nats: "NATS", beanstalkd: "Beanstalkd", sql: "SQL", redis: "Redis", storage: "Storage", cli: "CLI", go: "Go API", main: "Main" };
+const MESSAGING = new Set(["kafka", "amqp", "nats", "beanstalkd"]);
+const STORES = new Set(["sql", "redis", "storage"]);
 const REASON = { "same-service": "same service", "broker": "broker queue", "other-transport": "answered on the other transport" };
 // reasonChip says why an unmatched endpoint is not an orphan, or flags a
 // topic or queue that nothing analysed answers.
@@ -493,7 +497,7 @@ function sequenceOf(i, depth) {
       if (!e) continue;
       const ns = nextOf(jx.service, o.endpoint);
       if (!ns.length) {
-        const store = e.transport === "sql" || e.transport === "redis";
+        const store = STORES.has(e.transport);
         if (store ? !filters.stores : !filters.externals) continue;
         const [target, msg] = externalTarget(e);
         const to = part("x:" + e.transport + ":" + target, (TNAME[e.transport] || e.transport).toUpperCase() + " " + target);
@@ -592,7 +596,7 @@ function renderHome(main) {
   const byT = {};
   for (const l of D.links) { const t = l.kind === "shared-store" ? "shared " + l.transport : l.transport; byT[t] = (byT[t] || 0) + 1; }
   const top = J.map((j, i) => [i, reachCache[i]]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1] || J[a[0]].service.localeCompare(J[b[0]].service)).slice(0, 15);
-  const topics = [...keyIndex.entries()].filter(([k]) => /^(kafka|amqp|nats) /.test(k))
+  const topics = [...keyIndex.entries()].filter(([k]) => /^(kafka|amqp|nats|beanstalkd) /.test(k))
     .map(([k, v]) => [k, new Set(v.map(x => x.svc)).size]).filter(x => x[1] > 1).sort((a, b) => b[1] - a[1]).slice(0, 15);
   const orphans = [], seenOrphan = new Set();
   for (const [k, r] of Object.entries(D.dangling)) {
@@ -789,7 +793,7 @@ function outboundNodes(i, path, depth) {
     const e = ep(j.service, o.endpoint);
     if (!e) continue;
     const ns = nextOf(j.service, o.endpoint);
-    const store = e.transport === "sql" || e.transport === "redis";
+    const store = STORES.has(e.transport);
     if (!ns.length) {
       if (store ? !filters.stores : !filters.externals) continue;
       out.push(h("li", {}, h("div", { class: "node" }, h("span", { class: "spacer" }), kindDot(o.kind), badge(e.transport),
@@ -870,28 +874,39 @@ function expandAll(tree, note) {
 function collapseAll(tree) { tree.querySelectorAll("li").forEach(li => li._open && li._open(false)); }
 
 // ---- topic / table / route -----------------------------------------------------------
+// storeUses lists a table's (or key's, or file's) users: its writers and its
+// readers apart when their access is known, a read-write user in both.
+function storeUses(outs, row) {
+  const acc = x => ep(x.svc, x.id).access || "";
+  const groups = [
+    ["Written by", outs.filter(x => acc(x) === "write" || acc(x) === "read-write")],
+    ["Read by", outs.filter(x => acc(x) === "read" || acc(x) === "read-write")],
+    ["Used by", outs.filter(x => !acc(x))],
+  ].filter(g => g[1].length);
+  return groups.map(([title, list]) => [h("h3", {}, title + " (" + list.length + ")"), h("div", { class: "card" }, h("ul", { class: "list" }, list.map(row)))]);
+}
 function renderKey(main, t, key) {
   const eps = keyIndex.get(t + " " + key) || [];
   const side = inbound => eps.filter(x => !!ep(x.svc, x.id).inbound === inbound);
   const row = x => {
     const e = ep(x.svc, x.id);
     const js = (e.inbound ? entryOf : usedBy).get(x.svc + "|" + x.id) || [];
-    return h("li", {}, h("div", { class: "row" }, pill(x.svc), h("span", { class: "muted" }, e.role),
+    return h("li", {}, h("div", { class: "row" }, pill(x.svc), h("span", { class: "muted" }, e.access || e.role),
       e.handler ? h("span", { class: "handler" }, e.handler) : null, e.position ? h("span", { class: "handler" }, e.position) : null),
       js.length ? h("ul", { class: "list", style: "margin-left:18px" }, js.map(i => h("li", {}, journeyRow(i)))) : null);
   };
   const ins = side(true), outs = side(false);
   const linked = new Map();
   for (const x of ins) for (const c of callers.get(x.svc + "|" + x.id) || []) push(linked, c.svc, c);
-  const isStore = t === "sql" || t === "redis";
+  const isStore = STORES.has(t);
   fill(main, 
     h("div", { class: "crumbs" }, h("a", { href: "#/" }, "System"), " › ", TNAME[t] || t),
     h("h2", {}, badge(t), " ", h("span", { class: "mono", style: "font-size:inherit" }, key)),
     !eps.length ? h("div", { class: "card empty" }, "No endpoint has this key.") : null,
-    isStore ? [h("h3", {}, "Used by (" + outs.length + ")"), h("div", { class: "card" }, h("ul", { class: "list" }, outs.map(row)))] : [
-      h("h3", {}, (t === "kafka" || t === "amqp" || t === "nats" ? "Producers" : "Clients") + " (" + outs.length + ")"),
+    isStore ? storeUses(outs, row) : [
+      h("h3", {}, (MESSAGING.has(t) ? "Producers" : "Clients") + " (" + outs.length + ")"),
       h("div", { class: "card" }, outs.length ? h("ul", { class: "list" }, outs.map(row)) : h("div", { class: "empty" }, "None among the analysed services with this exact key.")),
-      h("h3", {}, (t === "kafka" || t === "amqp" || t === "nats" ? "Consumers" : "Servers") + " (" + ins.length + ")"),
+      h("h3", {}, (MESSAGING.has(t) ? "Consumers" : "Servers") + " (" + ins.length + ")"),
       h("div", { class: "card" }, ins.length ? h("ul", { class: "list" }, ins.map(row)) : h("div", { class: "empty" }, "None among the analysed services with this exact key.")),
       linked.size ? [h("h3", {}, "Linked callers (" + linked.size + ")"), h("div", { class: "card" }, h("ul", { class: "list" },
         [...linked.keys()].sort().map(s => h("li", {}, h("div", { class: "row" }, pill(s), ...linked.get(s).map(c => [h("span", { class: "key" }, keysOf(ep(c.svc, c.endpoint))), confChip(c.n)]))))))] : null]);

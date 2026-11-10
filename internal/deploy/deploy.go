@@ -18,6 +18,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/zalgonoise/codegraph/internal/model"
 )
 
 // Secret is the value shown for anything that comes from a secret.
@@ -56,6 +58,8 @@ type Container struct {
 	Ports   []int             `json:"ports,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`     // literal and ConfigMap values; Secret where a secret is involved
 	Secrets []string          `json:"secrets,omitempty"` // variables (or whole Secrets, "secret:<name>") taken from Secrets
+	// Databases are the databases its variables name (databasesOf).
+	Databases []model.Database `json:"databases,omitempty"`
 	// Filled by Match, for main containers.
 	Repo      string   `json:"repo,omitempty"`      // the repository its image is built from
 	Built     bool     `json:"built,omitempty"`     // Repo's CI builds the image (the inventory's images), rather than a name match
@@ -254,6 +258,7 @@ func containers(spec map[string]any, configMaps map[string]map[string]string) []
 			if len(env) > 0 {
 				ct.Env = env
 			}
+			ct.Databases = databasesOf(env)
 			sort.Strings(ct.Secrets)
 			out = append(out, ct)
 		}

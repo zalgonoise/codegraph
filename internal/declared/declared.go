@@ -52,7 +52,8 @@ type Endpoint struct {
 	Kind      string              `json:"kind,omitempty"`
 	Keys      []string            `json:"keys"`
 	Contract  string              `json:"contract,omitempty"`
-	Owner     string              `json:"owner,omitempty"` // a table or Redis key in another repository's store: that repository
+	Owner     string              `json:"owner,omitempty"`  // a table or Redis key in another repository's store: that repository
+	Access    string              `json:"access,omitempty"` // a table, key or file: read, write or read-write
 	Message   string              `json:"message,omitempty"`
 	Handler   string              `json:"handler,omitempty"`
 	Component string              `json:"component,omitempty"` // default: the position's directory, or the repository
@@ -143,6 +144,8 @@ func (f *File) validate() error {
 			return fmt.Errorf("%s: methods are for gRPC servers, instead of reaches", what)
 		case d.Owner != "" && d.Role != "query":
 			return fmt.Errorf("%s: only tables and Redis keys (role query) have an owner", what)
+		case d.Access != "" && (d.Role != "query" || model.Accesses(d.Access) != d.Access):
+			return fmt.Errorf("%s: access is read, write or read-write, for tables, keys and files (role query)", what)
 		}
 	}
 	return nil
@@ -159,7 +162,7 @@ func (f *File) endpoint(d Endpoint) model.Endpoint {
 	}
 	ep := model.Endpoint{
 		Transport: d.Transport, Role: d.Role, Direction: d.Direction, Kind: d.Kind, Contract: d.Contract, Owner: d.Owner,
-		Keys: append([]string(nil), d.Keys...), Message: d.Message, Handler: d.Handler,
+		Access: d.Access, Keys: append([]string(nil), d.Keys...), Message: d.Message, Handler: d.Handler,
 		Component: component, Position: d.Position, Source: "declared",
 	}
 	if d.Position != "" {

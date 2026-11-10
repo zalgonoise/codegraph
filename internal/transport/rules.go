@@ -112,6 +112,17 @@ type Rule struct {
 	HandlerMethods  []string `json:"handlerMethods,omitempty"`
 	CallerIsHandler bool     `json:"callerIsHandler,omitempty"`
 
+	// Store access: what a store call does with its keys. Access is read,
+	// write or read-write, or "statement": from the SQL of the key arguments,
+	// table by table (INSERT INTO a SELECT … FROM b writes a and reads b).
+	// AccessFuncs maps the called function's name to its access (gorm's
+	// Create: write, Find: read); with Chain, a call it does not map (gorm's
+	// Model, Table) takes the access of the calls it maps among those made on
+	// its result, through builder steps (Where, Order) returning the same type.
+	Access      string            `json:"access,omitempty"`
+	AccessFuncs map[string]string `json:"accessFuncs,omitempty"`
+	Chain       bool              `json:"chain,omitempty"`
+
 	// Router prefixes. A rule with Scope produces no endpoint: it declares a
 	// call that places routes under the path in KeyArgs[0] ("" without one):
 	//   returns: the call returns the scoped router (gin/echo Group, gorilla PathPrefix)
@@ -180,6 +191,14 @@ func (r *Rule) compile() error {
 			return fmt.Errorf("rule %q: keyMethods entries need a method", r.Name)
 		}
 	}
+	if !validAccess(r.Access) && r.Access != "statement" {
+		return fmt.Errorf("rule %q: access must be read, write, read-write or statement", r.Name)
+	}
+	for f, a := range r.AccessFuncs {
+		if a == "" || !validAccess(a) {
+			return fmt.Errorf("rule %q: accessFuncs[%q] must be read, write or read-write", r.Name, f)
+		}
+	}
 	switch r.Transform {
 	case "", "sql-table", "table-name", "grpc-method", "iris-path", "first-word", "grpc-gateway":
 	default:
@@ -197,6 +216,10 @@ func (r *Rule) compile() error {
 		}
 	}
 	return nil
+}
+
+func validAccess(a string) bool {
+	return a == "" || a == model.Read || a == model.Write || a == model.ReadWrite
 }
 
 func (r *Rule) match(c Callee) (capture string, ok bool) {
@@ -278,10 +301,19 @@ func Defaults() []Rule {
 	confluent := []string{"github.com/confluentinc/confluent-kafka-go/v2/kafka", "github.com/confluentinc/confluent-kafka-go/kafka"}
 	nats := []string{"github.com/nats-io/nats.go"}
 	amqp := []string{"github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp"}
+	beanstalk := []string{"github.com/kr/beanstalk"}
+	beanstalkWorkers := []string{"github.com/mikegleasonjr/workers"}
 	sqlPkg := []string{"database/sql"}
 	pgx := []string{"github.com/jackc/pgx/v5/...", "github.com/jackc/pgx/v4/..."}
 	redis := []string{"github.com/redis/go-redis/v9", "github.com/go-redis/redis/v8"}
 	gorm := []string{"gorm.io/gorm"}
+	gormAccess := map[string]string{
+		"Create": model.Write, "CreateInBatches": model.Write, "Save": model.Write, "Update": model.Write,
+		"Updates": model.Write, "UpdateColumn": model.Write, "UpdateColumns": model.Write, "Delete": model.Write,
+		"First": model.Read, "Take": model.Read, "Last": model.Read, "Find": model.Read, "FindInBatches": model.Read,
+		"FirstOrInit": model.Read, "Scan": model.Read, "Count": model.Read, "Pluck": model.Read, "Row": model.Read,
+		"Rows": model.Read, "FirstOrCreate": model.ReadWrite,
+	}
 
 	return []Rule{
 		// ---- HTTP servers ---------------------------------------------------
@@ -398,15 +430,29 @@ func Defaults() []Rule {
 		{Name: "amqp-consume-ctx", Transport: "amqp", Role: "consumer", Direction: in, Pkgs: amqp, Recv: "Channel",
 			Funcs: []string{"ConsumeWithContext"}, KeyArgs: []int{2}, CallerIsHandler: true},
 
+		// ---- Beanstalkd: tubes ----------------------------------------------
+		// A Tube is a name on a connection: Put sends to it, a TubeSet reserves
+		// from its names in the caller's loop, and a workers.WorkMux runs a
+		// handler per tube.
+		{Name: "beanstalk-dial", Transport: "beanstalkd", Role: "dial", Direction: out, Pkgs: beanstalk, Recv: "",
+			Funcs: []string{"Dial"}, KeyArgs: []int{1}},
+		{Name: "beanstalk-put", Transport: "beanstalkd", Role: "producer", Direction: out, Pkgs: beanstalk, Recv: "Tube",
+			Funcs: []string{"Put"}, KeyFields: []FieldRef{{Arg: 0, Field: "Name"}}},
+		{Name: "beanstalk-tubeset", Transport: "beanstalkd", Role: "consumer", Direction: in, Pkgs: beanstalk, Recv: "",
+			Funcs: []string{"NewTubeSet"}, KeyArgs: []int{1}, CallerIsHandler: true},
+		{Name: "beanstalk-workers-handle", Transport: "beanstalkd", Role: "consumer", Direction: in, Pkgs: beanstalkWorkers,
+			Recv: "WorkMux", Funcs: []string{"Handle"}, KeyArgs: []int{1}, HandlerArgs: []int{2}, HandlerMethods: []string{"Work"}},
+
 		// ---- SQL ------------------------------------------------------------
 		{Name: "sql-open", Transport: "sql", Role: "connect", Direction: out, Pkgs: sqlPkg, Recv: "",
 			Funcs: []string{"Open"}, KeyArgs: []int{0}},
 		{Name: "sql-query", Transport: "sql", Role: "query", Direction: out, Pkgs: sqlPkg, Recv: "DB|Tx",
-			Funcs: []string{"Query", "QueryRow", "Exec", "Prepare"}, KeyArgs: []int{1}, Transform: "sql-table"},
+			Funcs: []string{"Query", "QueryRow", "Exec", "Prepare"}, KeyArgs: []int{1}, Transform: "sql-table", Access: "statement"},
 		{Name: "sql-query-ctx", Transport: "sql", Role: "query", Direction: out, Pkgs: sqlPkg, Recv: "DB|Tx|Conn",
-			Funcs: []string{"QueryContext", "QueryRowContext", "ExecContext", "PrepareContext"}, KeyArgs: []int{2}, Transform: "sql-table"},
+			Funcs: []string{"QueryContext", "QueryRowContext", "ExecContext", "PrepareContext"}, KeyArgs: []int{2}, Transform: "sql-table",
+			Access: "statement"},
 		{Name: "pgx-query", Transport: "sql", Role: "query", Direction: out, Pkgs: pgx, Recv: "*",
-			Funcs: []string{"Query", "QueryRow", "Exec"}, KeyArgs: []int{2}, Transform: "sql-table"},
+			Funcs: []string{"Query", "QueryRow", "Exec"}, KeyArgs: []int{2}, Transform: "sql-table", Access: "statement"},
 		{Name: "pgx-connect", Transport: "sql", Role: "connect", Direction: out, Pkgs: pgx, Recv: "",
 			Funcs: []string{"Connect", "ConnectConfig", "New", "NewWithConfig"}, StaticKey: "postgres"},
 
@@ -416,13 +462,14 @@ func Defaults() []Rule {
 		{Name: "gorm-open", Transport: "sql", Role: "connect", Direction: out, Pkgs: gorm, Recv: "",
 			Funcs: []string{"Open"}, KeyMethods: []MethodRef{{Arg: 0, Method: "Name"}}},
 		{Name: "gorm-table", Transport: "sql", Role: "query", Direction: out, Pkgs: gorm, Recv: "DB",
-			Funcs: []string{"Table"}, KeyArgs: []int{1}, Transform: "table-name", SkipUnknown: true},
+			Funcs: []string{"Table"}, KeyArgs: []int{1}, Transform: "table-name", SkipUnknown: true,
+			AccessFuncs: gormAccess, Chain: true},
 		{Name: "gorm-raw", Transport: "sql", Role: "query", Direction: out, Pkgs: gorm, Recv: "DB",
-			Funcs: []string{"Raw", "Exec"}, KeyArgs: []int{1}, Transform: "sql-table", SkipUnknown: true},
+			Funcs: []string{"Raw", "Exec"}, KeyArgs: []int{1}, Transform: "sql-table", SkipUnknown: true, Access: "statement"},
 		{Name: "gorm-model", Transport: "sql", Role: "query", Direction: out, Pkgs: gorm, Recv: "DB",
-			Funcs: []string{"Model", "Create", "CreateInBatches", "Save", "First", "Take", "Last", "Find", "FindInBatches",
-				"FirstOrInit", "FirstOrCreate", "Delete", "Scan"},
-			KeyMethods: []MethodRef{{Arg: 1, Method: "TableName"}}, SkipUnknown: true},
+			Funcs: []string{"Model", "Create", "CreateInBatches", "Save", "Update", "Updates", "UpdateColumn", "UpdateColumns",
+				"First", "Take", "Last", "Find", "FindInBatches", "FirstOrInit", "FirstOrCreate", "Delete", "Scan", "Count", "Pluck"},
+			KeyMethods: []MethodRef{{Arg: 1, Method: "TableName"}}, SkipUnknown: true, AccessFuncs: gormAccess, Chain: true},
 
 		// ---- Redis ----------------------------------------------------------
 		{Name: "redis-publish", Transport: "redis", Role: "producer", Direction: out, Pkgs: redis, Recv: "*",

@@ -112,7 +112,7 @@ func (f *Flow) Mermaid() string {
 		if key, isKey := strings.CutPrefix(name, "k:"); isKey {
 			transport, label, _ := strings.Cut(key, " ")
 			class, shape := "outbound", ShapeStadium
-			if transport == "sql" || transport == "redis" {
+			if model.Store(transport) {
 				class, shape = "store", ShapeCylinder
 			}
 			g.AddNode(name, strings.ToUpper(transport)+"\n"+clip(label), "", class, shape)

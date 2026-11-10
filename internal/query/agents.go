@@ -126,27 +126,39 @@ func Context(r *Run) string {
 			}
 			fmt.Fprintf(&b, "\nCalls: %s.\n", strings.Join(parts, "; "))
 		}
-		var stores []string
-		seen := map[string]bool{}
+		access := map[string][]string{} // "transport `key`": the accesses of its endpoints
 		for _, ep := range m.Endpoints {
-			if (ep.Transport == "sql" || ep.Transport == "redis") && ep.Role == "query" {
+			if model.Store(ep.Transport) && ep.Role == "query" {
 				for _, k := range ep.Keys {
-					if k != model.Unknown && !seen[ep.Transport+k] {
-						seen[ep.Transport+k] = true
-						stores = append(stores, ep.Transport+" `"+k+"`")
+					if k != model.Unknown {
+						s := ep.Transport + " `" + k + "`"
+						access[s] = append(access[s], ep.Access)
 					}
 				}
 			}
 		}
-		if len(stores) > 0 {
-			sort.Strings(stores)
+		if len(access) > 0 {
+			var stores []string
+			for _, s := range sortedKeys(access) {
+				if a := model.Accesses(access[s]...); a != "" {
+					s += " (" + a + ")"
+				}
+				stores = append(stores, s)
+			}
 			fmt.Fprintf(&b, "\nStores: %s.\n", strings.Join(stores, ", "))
+		}
+		if dbs := r.databases(m.Service); len(dbs) > 0 {
+			var names []string
+			for _, db := range dbs {
+				names = append(names, "`"+db.String()+"`")
+			}
+			fmt.Fprintf(&b, "\nDatabases (deployment): %s.\n", strings.Join(names, ", "))
 		}
 	}
 	var orphans []string
 	seen := map[string]bool{}
 	for _, d := range r.System.Dangling {
-		if d.Reason == "" && (d.Transport == "kafka" || d.Transport == "amqp" || d.Transport == "nats") && d.Key != model.Unknown {
+		if d.Reason == "" && model.Messaging(d.Transport) && d.Key != model.Unknown {
 			line := fmt.Sprintf("- %s %s `%s` (%s)", d.Transport, d.Role, d.Key, d.Service)
 			if !seen[line] {
 				seen[line] = true

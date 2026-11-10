@@ -129,6 +129,9 @@ func (d *Detector) detect(fn *ssa.Function, site ssa.CallInstruction) []Detectio
 					dets = vs
 				}
 			}
+			if rule.Access == "statement" {
+				dets = d.byStatement(rule, site, dets)
+			}
 			var out []Detection
 			for _, x := range dets {
 				if rule.SkipUnknown && len(x.Endpoint.Keys) == 1 && x.Endpoint.Keys[0] == model.Unknown {
@@ -271,6 +274,7 @@ func (d *Detector) endpoint(rule *Rule, c Callee, capture string, fn *ssa.Functi
 		Count:     1,
 	}
 	ep.Sites = []model.Site{{Function: ep.Function, Position: ep.Position}}
+	ep.Access = d.access(rule, c, site)
 	if rule.Transport == "grpc" && keys[0] != model.Unknown {
 		svc, _, _ := strings.Cut(keys[0], "/")
 		ep.Contract = d.Resolver.GRPCServiceName(c.Pkg, svc)
@@ -382,9 +386,10 @@ func (d *Detector) attach(rule *Rule, det *Detection, handlers []ssa.Value) {
 			}
 		}
 		// A single wrapped handler (mw.Wrap(h.Handle)) names the endpoint and
-		// owns it, rather than the middleware factory.
+		// owns it, rather than the middleware factory; so does the method a
+		// library adapter runs (queue.Adapt(h): (*H).Work).
 		if len(det.Roots) == 1 && strings.HasSuffix(ep.Handler, "(…)") {
-			if inner := det.Roots[0].Innermost(); inner != det.Roots[0].Func {
+			if inner := det.Roots[0].Innermost(); inner != det.Roots[0].Func || inner.Parent() == nil {
 				det.Endpoint.Handler = strings.TrimSuffix(ep.Handler, "…)") + symbols.FuncLabel(inner) + ")"
 				if pkg := symbols.PkgPath(inner); d.ModulePkgs[pkg] {
 					det.Endpoint.Component = pkg
@@ -511,6 +516,153 @@ func (d *Detector) message(res *resolve.Resolver, rule *Rule, args []ssa.Value) 
 	return ""
 }
 
+// access is what a store call does with its keys: the rule's, the called
+// function's (AccessFuncs), or, with Chain, that of the calls made on its
+// result. A "statement" rule's access is set table by table (byStatement).
+func (d *Detector) access(rule *Rule, c Callee, site ssa.CallInstruction) string {
+	if a, ok := rule.AccessFuncs[c.Name]; ok {
+		return a
+	}
+	if rule.Chain {
+		if v := site.Value(); v != nil {
+			return model.Accesses(d.chainAccess(v, rule.AccessFuncs, map[ssa.Value]bool{}, 0)...)
+		}
+	}
+	if rule.Access == "statement" {
+		return ""
+	}
+	return rule.Access
+}
+
+// maxChainDepth bounds the helpers a builder is followed into.
+const maxChainDepth = 3
+
+// chainAccess follows a builder's result (gorm's Model(&x), Table(name))
+// through the calls made on it, collecting the access of each call funcs
+// names. Calls it does not name are followed when they return the builder
+// again (Where, Order, Session), as are phis, the functions the builder is
+// passed to (a scope helper), into their parameter and, when they return the
+// builder's type, their result, and the callers of a function returning it
+// (a query-building helper). A builder passed as a value (converted to an
+// interface: Where("id IN (?)", subquery)) is a subquery: it is read.
+func (d *Detector) chainAccess(v ssa.Value, funcs map[string]string, seen map[ssa.Value]bool, depth int) []string {
+	if v == nil || seen[v] || depth > maxChainDepth {
+		return nil
+	}
+	seen[v] = true
+	refs := v.Referrers()
+	if refs == nil {
+		return nil
+	}
+	var out []string
+	for _, ref := range *refs {
+		switch x := ref.(type) {
+		case *ssa.Phi:
+			out = append(out, d.chainAccess(x, funcs, seen, depth)...)
+		case *ssa.MakeInterface:
+			out = append(out, model.Read)
+		case *ssa.Return:
+			if depth >= maxChainDepth || d.Reach == nil {
+				continue
+			}
+			for i, r := range x.Results {
+				if r != v {
+					continue
+				}
+				for _, e := range d.Reach.Callers(x.Parent()) {
+					if e.Site != nil {
+						out = append(out, d.chainAccess(result(e.Site, i, len(x.Results)), funcs, seen, depth+1)...)
+					}
+				}
+			}
+		case ssa.CallInstruction:
+			c := x.Common()
+			callee := c.StaticCallee()
+			name, onV := "", false
+			switch {
+			case c.IsInvoke():
+				name, onV = c.Method.Name(), c.Value == v
+			case callee != nil && callee.Signature.Recv() != nil:
+				name, onV = callee.Name(), len(c.Args) > 0 && c.Args[0] == v
+			}
+			call, _ := x.(*ssa.Call)
+			sameType := call != nil && types.Identical(call.Type(), v.Type())
+			if onV {
+				if a, ok := funcs[name]; ok {
+					out = append(out, a)
+				} else if sameType {
+					out = append(out, d.chainAccess(call, funcs, seen, depth)...)
+				}
+				continue
+			}
+			if callee == nil || len(callee.Blocks) == 0 {
+				continue
+			}
+			for i, a := range c.Args {
+				if a == v && i < len(callee.Params) {
+					out = append(out, d.chainAccess(callee.Params[i], funcs, seen, depth+1)...)
+				}
+			}
+			if sameType {
+				out = append(out, d.chainAccess(call, funcs, seen, depth+1)...)
+			}
+		}
+	}
+	return out
+}
+
+// result is the value a call site gives for result i of n: the call itself
+// for a single result, else the Extract of that index (nil when unused).
+func result(site ssa.CallInstruction, i, n int) ssa.Value {
+	call, ok := site.(*ssa.Call)
+	if !ok {
+		return nil
+	}
+	if n == 1 {
+		return call
+	}
+	if refs := call.Referrers(); refs != nil {
+		for _, r := range *refs {
+			if e, ok := r.(*ssa.Extract); ok && e.Index == i {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+// byStatement sets the access of a "statement" rule's detections table by
+// table, from the SQL of its key arguments: a detection whose tables are
+// accessed differently (INSERT INTO a SELECT … FROM b) becomes one per access.
+func (d *Detector) byStatement(rule *Rule, site ssa.CallInstruction, dets []Detection) []Detection {
+	args := resolve.Args(site.Common())
+	var stmts []string
+	for _, i := range rule.KeyArgs {
+		if i < len(args) {
+			stmts = append(stmts, d.Resolver.StringsOrUnknown(args[i])...)
+		}
+	}
+	tables := sqlAccess(stmts)
+	var out []Detection
+	for _, det := range dets {
+		var order []string
+		byAccess := map[string][]string{}
+		for _, k := range det.Endpoint.Keys {
+			a := tables[strings.ToLower(k)]
+			if _, ok := byAccess[a]; !ok {
+				order = append(order, a)
+			}
+			byAccess[a] = append(byAccess[a], k)
+		}
+		for _, a := range order {
+			x := det
+			x.Endpoint.Keys, x.Endpoint.Access = byAccess[a], a
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 func (d *Detector) pos(site ssa.CallInstruction, fn *ssa.Function) string {
 	p := site.Pos()
 	if !p.IsValid() {
@@ -523,20 +675,89 @@ var httpMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "HEAD": true, "OPTIONS": true,
 }
 
-var sqlTableRe = regexp.MustCompile(`(?i)\b(?:from|into|update|join)\s+"?([a-zA-Z_][\w.]*)`)
+// sqlTableRe matches a table after the keyword that introduces it.
+var sqlTableRe = regexp.MustCompile("(?i)\\b(from|into|update|join)\\s+[`\"]?([a-zA-Z_][\\w.]*)")
+
+// sqlNotTable matches what comes before an UPDATE that names no table: a
+// locking read (SELECT … FOR UPDATE SKIP LOCKED) and an upsert's assignments
+// (ON DUPLICATE KEY UPDATE status = …).
+var sqlNotTable = regexp.MustCompile(`(?i)\b(for|key)\s+$`)
+
+// sqlTableRefs returns the tables a statement names, lower-cased, each with
+// the keyword before it: from, into, update or join.
+func sqlTableRefs(stmt string) [][2]string {
+	var out [][2]string
+	for _, m := range sqlTableRe.FindAllStringSubmatchIndex(stmt, -1) {
+		kw, table := strings.ToLower(stmt[m[2]:m[3]]), strings.ToLower(stmt[m[4]:m[5]])
+		if kw == "update" && sqlNotTable.MatchString(stmt[:m[0]]) {
+			continue
+		}
+		out = append(out, [2]string{kw, table})
+	}
+	return out
+}
 
 // sqlTables turns SQL statements into the tables they touch.
 func sqlTables(keys []string) []string {
 	var out []string
 	for _, k := range keys {
-		ms := sqlTableRe.FindAllStringSubmatch(k, -1)
-		if len(ms) == 0 {
+		refs := sqlTableRefs(k)
+		if len(refs) == 0 {
 			out = append(out, model.Unknown)
 			continue
 		}
-		for _, m := range ms {
-			out = append(out, strings.ToLower(m[1]))
+		for _, r := range refs {
+			out = append(out, r[1])
 		}
+	}
+	return out
+}
+
+var (
+	sqlVerbRe = regexp.MustCompile(`^[\s(]*([a-zA-Z]+)`)
+	sqlDMLRe  = regexp.MustCompile(`(?i)\b(insert|replace|update|delete|merge)\b`)
+	// sqlTargets is the keyword before the table each writing verb changes.
+	sqlTargets = map[string]string{"insert": "into", "replace": "into", "merge": "into", "update": "update", "delete": "from"}
+)
+
+// sqlAccess tells, for each table of some statements, whether they read it,
+// write it or both. A statement writes the table its verb targets (INSERT
+// INTO, REPLACE INTO, MERGE INTO, UPDATE, the first DELETE FROM) and reads
+// the others; a SELECT reads all; a WITH takes the verb of the statement
+// after its common table expressions. A statement whose verb is unknown, or
+// unresolved, says nothing.
+func sqlAccess(stmts []string) map[string]string {
+	all := map[string][]string{}
+	for _, s := range stmts {
+		verb := ""
+		if m := sqlVerbRe.FindStringSubmatch(s); m != nil {
+			verb = strings.ToLower(m[1])
+		}
+		if verb == "with" {
+			verb = "select"
+			if m := sqlDMLRe.FindStringSubmatch(s); m != nil {
+				verb = strings.ToLower(m[1])
+			}
+		}
+		target := sqlTargets[verb]
+		reads := verb == "select" || verb == "show" || verb == "describe" || verb == "explain"
+		for i, r := range sqlTableRefs(s) {
+			a := ""
+			switch {
+			case reads:
+				a = model.Read
+			case target == "":
+			case r[0] == target && (verb != "delete" || i == 0):
+				a = model.Write
+			default:
+				a = model.Read
+			}
+			all[r[1]] = append(all[r[1]], a)
+		}
+	}
+	out := make(map[string]string, len(all))
+	for t, as := range all {
+		out[t] = model.Accesses(as...)
 	}
 	return out
 }

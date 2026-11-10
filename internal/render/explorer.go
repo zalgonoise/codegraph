@@ -139,6 +139,7 @@ type exploreEndpoint struct {
 	Inbound   bool     `json:"inbound,omitempty"`
 	Kind      string   `json:"kind"`
 	Keys      []string `json:"keys"`
+	Access    string   `json:"access,omitempty"`
 	Contract  string   `json:"contract,omitempty"`
 	Message   string   `json:"message,omitempty"`
 	Handler   string   `json:"handler,omitempty"`
@@ -178,7 +179,7 @@ func explorerData(sys *model.System, ms []*model.Manifest) exploreData {
 		for _, ep := range m.Endpoints {
 			d.Endpoints[m.Service+"|"+ep.ID] = exploreEndpoint{
 				Transport: ep.Transport, Role: ep.Role, Inbound: ep.Direction == model.Inbound,
-				Kind: ep.InteractionKind(), Keys: ep.Keys, Contract: ep.Contract, Message: ep.Message,
+				Kind: ep.InteractionKind(), Keys: ep.Keys, Access: ep.Access, Contract: ep.Contract, Message: ep.Message,
 				Handler: ep.Handler, Position: ep.Position,
 			}
 		}

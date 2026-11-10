@@ -40,6 +40,7 @@ func TestSamples(t *testing.T) {
 		{"-dir", "../../testdata/tool", "-entry", "./cmd/...", "-out", out, "-format", "json"},
 		{"-dir", "../../testdata/mailer", "-library", "-out", out, "-format", "json,md"},
 		{"-dir", "../../testdata/pipeline", "-out", out, "-format", "json"},
+		{"-dir", "../../testdata/queue", "-entry", "./cmd/...", "-rules", "../../testdata/rules/inhouse.json", "-out", out, "-format", "json"},
 	} {
 		if err := runAnalyze(args); err != nil {
 			t.Fatalf("analyze %v: %v", args, err)
@@ -54,6 +55,8 @@ func TestSamples(t *testing.T) {
 	toolAdmin := readManifest(t, filepath.Join(out, "tool-admin", "manifest.json"))
 	mailer := readManifest(t, filepath.Join(out, "mailer", "manifest.json"))
 	pipeline := readManifest(t, filepath.Join(out, "pipeline", "manifest.json"))
+	scanner := readManifest(t, filepath.Join(out, "queue-scanner", "manifest.json"))
+	worker := readManifest(t, filepath.Join(out, "queue-worker", "manifest.json"))
 	if _, err := writeDeclared("../../testdata/declared", &config.Analyze{Out: out, Formats: map[string]bool{"json": true, "md": true}}); err != nil {
 		t.Fatalf("declared: %v", err)
 	}
@@ -90,7 +93,8 @@ func TestSamples(t *testing.T) {
 			"outbound http client GET http://inventory:8081/items/* in=internal/clients/inventory",
 			"outbound kafka producer orders.created msg=orders.OrderCreated in=internal/domain/orders",
 			"outbound sql connect postgres in=cmd/orders",
-			"outbound sql query orders in=internal/storage x2",
+			"outbound sql query orders read in=internal/storage",  // SELECT
+			"outbound sql query orders write in=internal/storage", // INSERT
 		})
 	})
 	t.Run("orders/implementations", func(t *testing.T) {
@@ -261,8 +265,9 @@ func TestSamples(t *testing.T) {
 			// gorm: TableName() of the model (Create, Model), Table(name) without its alias, the dialector's Name();
 			// Find(&[]receipt) after Table() adds no "*" endpoint
 			"outbound sql connect mysql in=billing",
-			"outbound sql query invoices in=billing x3",
-			"outbound sql query receipts in=billing",
+			"outbound sql query invoices write in=billing x3",
+			"outbound sql query receipts read in=billing", // a query a helper builds and its caller ends
+			"outbound sql query refunds read in=billing",  // a subquery
 		})
 	})
 	t.Run("tool/commands", func(t *testing.T) {
@@ -272,7 +277,7 @@ func TestSamples(t *testing.T) {
 			"inbound cli command serve handler=main.serve in=cmd/tool",
 			"inbound http listener :8095 in=cmd/tool",
 			"inbound http server GET /status handler=main.serve$1 in=cmd/tool",
-			"outbound sql query schema_migrations in=cmd/tool",
+			"outbound sql query schema_migrations write in=cmd/tool",
 			"outbound sql connect postgres in=cmd/tool x2",
 		})
 		expect(t, journeyFacts(tool), []string{
@@ -286,8 +291,8 @@ func TestSamples(t *testing.T) {
 			"inbound cli command purge handler=main.runPurge in=cmd/admin",
 			"inbound cli command users handler=main.newUsersCmd$1 in=cmd/admin",
 			"outbound sql connect postgres in=cmd/admin x2",
-			"outbound sql query sessions in=cmd/admin",
-			"outbound sql query users in=cmd/admin",
+			"outbound sql query sessions write in=cmd/admin",
+			"outbound sql query users read in=cmd/admin",
 		})
 		// kelseyhightower/envconfig: tagged fields by their tag, untagged ones by
 		// the prefix and their name (split_words, a nested struct's name, a type
@@ -331,7 +336,7 @@ func TestSamples(t *testing.T) {
 			"inbound go api mailer.Sender.Send handler=mailer.Sender.Send → (*mailer.Client).Send, (*mailer.queued).Send in=mailer",
 			"inbound go internal mailer/internal/tmpl.Render handler=tmpl.Render in=internal/tmpl",
 			"outbound http client POST http://relay:8025/send in=mailer",
-			"outbound sql query outbox in=mailer",
+			"outbound sql query outbox write in=mailer",
 		})
 		expect(t, journeyFacts(mailer), []string{
 			"go mailer.Client.Send roots=(*mailer.Client).Send components=mailer,internal/tmpl outbound=http client POST http://relay:8025/send (sync)",
@@ -399,7 +404,7 @@ func TestSamples(t *testing.T) {
 			"kafka billing.invoice.paid roots=main.Wrap$1 components=example.com/inhouse/ledger-sdk-go,example.com/inhouse/ledger-sdk-go/pb,billing" +
 				" outbound=amqp producer billing.audit (async),amqp producer billing.receipts (async)," +
 				"grpc client LedgerService/Balance (sync),kafka producer billing.payment.recorded (async)," +
-				"sql query invoices (sync),sql query receipts (sync)",
+				"sql query invoices (sync),sql query receipts (sync),sql query refunds (sync)",
 			"kafka billing.invoice.requested roots=main.Wrap$1 components=billing" +
 				" outbound=kafka producer billing.invoice.issued (async),redis query billing:invoice:* (sync),sql query invoices (sync)",
 		})
@@ -409,7 +414,7 @@ func TestSamples(t *testing.T) {
 			funcs[j.Key] = j.Functions
 		}
 		expect(t, funcs["billing.invoice.paid"], []string{"(*ledgersdk.client).Balance", "(*main.handler).emit", "(*main.handler).invoicePaid",
-			"(*main.store).markPaid", "(*main.store).receipts", "(*pb.ledgerServiceClient).Balance", "main.Wrap$1"})
+			"(*main.store).markPaid", "(*main.store).receipts", "(*main.store).receiptsOf", "(*pb.ledgerServiceClient).Balance", "main.Wrap$1"})
 		expect(t, funcs["billing.invoice.requested"], []string{"(*main.handler).emit", "(*main.handler).invoiceRequested", "(*main.store).save", "main.Wrap$1"})
 		// The helper's endpoints say which caller they were resolved for.
 		via := map[string]string{}
@@ -506,6 +511,9 @@ func TestSamples(t *testing.T) {
 			"billing -> ledger grpc LedgerService sync exact",                                    // the SDK's call, matched by contract
 			"billing -> gateway http POST /backoffice/payments/{payment_id}/refund sync pattern", // an iris typed parameter
 			"billing -> ledger redis billing:invoice:* shared-store name-only",                   // the same Redis key pattern
+			"queue-scanner -> queue-worker beanstalkd scans async exact",
+			"queue-scanner -> queue-worker beanstalkd scans-priority async exact",
+			"queue-worker -> queue-scanner beanstalkd scan-results async exact",
 		})
 		var dangling []string
 		for _, d := range sys.Dangling {
@@ -581,8 +589,8 @@ func TestSamples(t *testing.T) {
 			"inbound http server GET /metrics handler=http.NotFoundHandler(…) in=pipeline", // a library's handler: no journey
 			"outbound http client GET http://feed:8080/readings in=pipeline",
 			"outbound sql connect postgres in=pipeline",
-			"outbound sql query checkpoints in=pipeline",
-			"outbound sql query readings in=pipeline",
+			"outbound sql query checkpoints read in=pipeline",
+			"outbound sql query readings write in=pipeline",
 		})
 		expect(t, journeyFacts(pipeline), []string{"http GET /health roots=main.health$1 components=pipeline outbound=sql query checkpoints (sync)"})
 		expect(t, mainFacts(pipeline), []string{
@@ -650,6 +658,34 @@ func TestSamples(t *testing.T) {
 			"  ledger -> external grpc LedgerService (sync)", // the gateway's client of its own server
 		})
 	})
+	t.Run("queue/tubes", func(t *testing.T) {
+		// Beanstalkd tubes: kr/beanstalk's Tube.Put (the name from the tube's
+		// literal) and TubeSet (reserved in the caller's loop), a workers mux,
+		// and an in-house client whose handlers a library adapter wraps.
+		expect(t, endpointFacts(scanner), []string{
+			"inbound beanstalkd consumer scan-results handler=tubequeue.AdaptHandler((*main.results).Work) in=cmd/scanner",
+			"inbound http listener :8080 in=cmd/scanner",
+			"inbound http server POST /scans handler=main.queueScan(…) in=cmd/scanner",
+			"outbound beanstalkd dial beanstalkd:11300 in=cmd/scanner",
+			"outbound beanstalkd producer scans in=cmd/scanner",
+			"outbound beanstalkd producer scans-priority in=cmd/scanner",
+		})
+		expect(t, journeyFacts(scanner), []string{
+			"beanstalkd scan-results roots=(*main.results).Work components=cmd/scanner outbound=",
+			"http POST /scans roots=main.queueScan$1 components=cmd/scanner" +
+				" outbound=beanstalkd producer scans (async),beanstalkd producer scans-priority (async)",
+		})
+		expect(t, endpointFacts(worker), []string{
+			"inbound beanstalkd consumer scans handler=main.main$1 in=cmd/worker",
+			"inbound beanstalkd consumer scans-priority handler=main.reservePriority in=cmd/worker",
+			"outbound beanstalkd dial beanstalkd:11300 in=cmd/worker",
+			"outbound beanstalkd producer scan-results in=cmd/worker",
+		})
+		expect(t, journeyFacts(worker), []string{
+			"beanstalkd scans roots=main.main$1 components=cmd/worker outbound=beanstalkd producer scan-results (async)",
+			"beanstalkd scans-priority roots=main.reservePriority components=cmd/worker outbound=beanstalkd producer scan-results (async)",
+		})
+	})
 	t.Run("system/journeys", func(t *testing.T) {
 		var got []string
 		for _, sj := range sys.Journeys {
@@ -663,16 +699,17 @@ func TestSamples(t *testing.T) {
 			"orders http POST /orders (sync)",
 			"  orders -> inventory http GET /items/{sku} (sync) => GET /items/{sku}",
 			"  orders -> inventory kafka orders.created (async) => orders.created",
-			"  orders -> external sql orders (sync)",
+			"  orders -> external sql orders write (sync)",
 			"billing kafka billing.invoice.paid (async)",
-			"  billing -> external sql invoices (sync)",
-			"  billing -> external sql receipts (sync)",
+			"  billing -> external sql invoices write (sync)",
+			"  billing -> external sql receipts read (sync)",
+			"  billing -> external sql refunds read (sync)",
 			"  billing -> external kafka billing.payment.recorded (async)",
 			"  billing -> ledger grpc LedgerService/Balance (sync) => LedgerService/Balance",
 			"  billing -> external amqp billing.audit (async)",
 			"  billing -> external amqp billing.receipts (async)",
 			"billing amqp billing.refunds (async)",
-			"  billing -> external sql invoices (sync)",
+			"  billing -> external sql invoices write (sync)",
 			"  billing -> gateway http POST /backoffice/payments/{payment_id}/refund (sync) => POST /backoffice/payments/{payment_id}/refund",
 			"ledger grpc LedgerService/Credit (sync)",
 			"  ledger -> external redis billing:invoice:* (sync)",
@@ -680,7 +717,7 @@ func TestSamples(t *testing.T) {
 			"    notifier -> external sql notifications (sync)",
 			"    notifier -> external http POST http://smtp-relay/send (sync)",
 			"  ledger -> billing kafka billing.invoice.requested (async) => billing.invoice.requested",
-			"    billing -> external sql invoices (sync)",
+			"    billing -> external sql invoices write (sync)",
 			"    billing -> external redis billing:invoice:* (sync)",
 			"    billing -> external kafka billing.invoice.issued (async)",
 			// The gateway's routes continue into the methods they forward to, in
@@ -692,11 +729,21 @@ func TestSamples(t *testing.T) {
 			"      notifier -> external sql notifications (sync)",
 			"      notifier -> external http POST http://smtp-relay/send (sync)",
 			"    ledger -> billing kafka billing.invoice.requested (async) => billing.invoice.requested",
-			"      billing -> external sql invoices (sync)",
+			"      billing -> external sql invoices write (sync)",
 			"      billing -> external redis billing:invoice:* (sync)",
 			"      billing -> external kafka billing.invoice.issued (async)",
 			"ledger http GET /v1/accounts/{account}/balance (sync)",
 			"  ledger -> ledger grpc LedgerService/Balance (sync) => LedgerService/Balance",
+			// Tubes: the scan goes to the worker, and its result comes back.
+			"queue-scanner http POST /scans (sync)",
+			"  queue-scanner -> queue-worker beanstalkd scans (async) => scans",
+			"    queue-worker -> queue-scanner beanstalkd scan-results (async) => scan-results",
+			"  queue-scanner -> queue-worker beanstalkd scans-priority (async) => scans-priority",
+			"    queue-worker -> queue-scanner beanstalkd scan-results (async) => scan-results",
+			"queue-worker beanstalkd scans (async)",
+			"  queue-worker -> queue-scanner beanstalkd scan-results (async) => scan-results",
+			"queue-worker beanstalkd scans-priority (async)",
+			"  queue-worker -> queue-scanner beanstalkd scan-results (async) => scan-results",
 		})
 	})
 }
@@ -729,6 +776,9 @@ func endpointFacts(m *model.Manifest) []string {
 			continue
 		}
 		f := fmt.Sprintf("%s %s %s %s", ep.Direction, ep.Transport, ep.Role, strings.Join(ep.Keys, ","))
+		if ep.Access != "" {
+			f += " " + ep.Access
+		}
 		if ep.Message != "" {
 			f += " msg=" + ep.Message
 		}
@@ -847,6 +897,9 @@ func hopFacts(hops []model.Hop, indent string) []string {
 			to = "external"
 		}
 		f := fmt.Sprintf("%s%s -> %s %s %s (%s)", indent, h.From, to, h.Transport, h.Key, h.Kind)
+		if h.Access != "" {
+			f = fmt.Sprintf("%s%s -> %s %s %s %s (%s)", indent, h.From, to, h.Transport, h.Key, h.Access, h.Kind)
+		}
 		if h.Journey != "" {
 			f += " => " + h.Journey
 		}
@@ -954,6 +1007,8 @@ spec:
           env:
             - name: INVENTORY_URL
               value: "http://inventory:8081"
+            - name: DB_NAME
+              value: orders
 ---
 apiVersion: v1
 kind: Service
@@ -1018,8 +1073,11 @@ spec:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env := b.Deploy.Workloads[0].Containers[0].Env; env["INVENTORY_URL"] != "" || len(env) != 1 {
+	if env := b.Deploy.Workloads[0].Containers[0].Env; env["INVENTORY_URL"] != "" || env["DB_NAME"] != "" || len(env) != 2 {
 		t.Errorf("-no-settings left values: %v", env)
+	}
+	if dbs := b.Deploy.Workloads[0].Containers[0].Databases; len(dbs) != 1 || dbs[0].Name != "orders" {
+		t.Errorf("-no-settings should keep database names: %v", dbs)
 	}
 	for _, m := range b.Manifests {
 		for _, ep := range m.Endpoints {
@@ -1034,6 +1092,86 @@ spec:
 	}
 	if err := runBundle([]string{"-run", gz, "-out", gz}); err == nil {
 		t.Error("a bundle written over the one it reads should be refused")
+	}
+}
+
+// Services configured with one database (by the deployment) hand data over
+// through its tables: the payouts API writes what the send job, a CronJob,
+// reads, and the job's updates go back to what the API reads. Without the
+// deployment, two mains of one module share nothing.
+func TestDataFlows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds SSA for a sample")
+	}
+	out := t.TempDir()
+	if err := runAnalyze([]string{"-dir", "../../testdata/payouts", "-entry", "./cmd/...", "-out", out, "-format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	dep := filepath.Join(out, "deploy")
+	if err := runDeploy([]string{"-rendered", "../../testdata/payouts/deploy.yaml", "-env", "production", "-run", out, "-out", dep}); err != nil {
+		t.Fatal(err)
+	}
+	sysDir := filepath.Join(out, "_system")
+	manifests := filepath.Join(out, "*", "manifest.json")
+	if err := runLink([]string{"-deploy", filepath.Join(dep, "deploy.json"), "-format", "json,agents", "-out", sysDir, manifests}); err != nil {
+		t.Fatal(err)
+	}
+	var sys model.System
+	data, err := os.ReadFile(filepath.Join(sysDir, "system.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &sys); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, l := range sys.Links {
+		got = append(got, fmt.Sprintf("%s -> %s %s %s %s %s", l.From, l.To, l.Transport, l.Key, l.Kind, l.Confidence))
+	}
+	expect(t, got, []string{
+		"payouts-api -> payouts-send sql payouts.payouts async same-database", // POST /payouts inserts, the job selects
+		"payouts-send -> payouts-api sql payouts.payouts async same-database", // the job updates, GET selects
+	})
+	// POST /payouts writes what the job reads on its schedule: the journey goes
+	// on into the job's, which sends to the bank. The job's own write is not a
+	// way back into itself, and GET only reads.
+	var journeys []string
+	for _, sj := range sys.Journeys {
+		journeys = append(journeys, fmt.Sprintf("%s %s %s (%s)", sj.Service, sj.Transport, sj.Key, sj.Schedule))
+		journeys = append(journeys, hopFacts(sj.Hops, "  ")...)
+	}
+	expect(t, journeys, []string{
+		"payouts-api http POST /payouts ()",
+		"  payouts-api -> payouts-send sql payouts.payouts write (async) => main",
+		"    payouts-send -> external sql mysql (sync)",
+		"    payouts-send -> external sql payouts read (sync)",
+		"    payouts-send -> external http POST http://bank:8443/transfers (sync)",
+		"    payouts-send -> external sql payouts write (sync)",
+	})
+	if s := sys.Schedules["payouts-send|main"]; s != "15 15 * * 1-5" {
+		t.Errorf("the send job's schedule: %q", s)
+	}
+	for _, sj := range sys.Journeys {
+		for _, h := range sj.Hops {
+			if h.Journey == "main" && h.Schedule != "15 15 * * 1-5" {
+				t.Errorf("the hop into the job has no schedule: %+v", h)
+			}
+		}
+	}
+
+	paths, _ := filepath.Glob(manifests)
+	if plain, err := linkRun(&config.Link{Manifests: paths, Out: filepath.Join(out, "plain")}); err != nil || len(plain.Links) != 0 {
+		t.Errorf("without the deployment: %v, %v", plain, err)
+	}
+
+	answer := captureStdout(t, func() error { return runQuery([]string{"-run", out, "-explorer", "none", "who", "payouts"}) })
+	for _, s := range []string{"Written by:", "Read by:", "- **payouts-send** query in database `payouts-main/payouts`"} {
+		if !strings.Contains(answer, s) {
+			t.Errorf("who payouts lacks %q:\n%s", s, answer)
+		}
+	}
+	if ctx, _ := os.ReadFile(filepath.Join(sysDir, "context.md")); !strings.Contains(string(ctx), "Databases (deployment): `payouts-main/payouts`.") {
+		t.Errorf("context.md names no database:\n%.600s", ctx)
 	}
 }
 

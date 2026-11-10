@@ -70,6 +70,8 @@ func TestInvalid(t *testing.T) {
 		"reaches out": {Endpoint{Direction: model.Outbound, Transport: "sql", Role: "query", Keys: []string{"t"}, Reaches: []string{"*"}}, "only inbound"},
 		"methods":     {Endpoint{Direction: model.Inbound, Transport: "http", Role: "server", Keys: []string{"GET /"}, Methods: map[string][]string{"X": nil}}, "gRPC servers"},
 		"unknown ref": {Endpoint{Direction: model.Inbound, Transport: "kafka", Role: "consumer", Keys: []string{"t"}, Reaches: []string{"sql nope"}}, "no outbound endpoint"},
+		"access":      {Endpoint{Direction: model.Outbound, Transport: "sql", Role: "query", Keys: []string{"t"}, Access: "delete"}, "access is read"},
+		"access role": {Endpoint{Direction: model.Outbound, Transport: "kafka", Role: "producer", Keys: []string{"t"}, Access: "write"}, "access is read"},
 	} {
 		f := &File{Service: "s", Repository: "r", Endpoints: []Endpoint{tc.ep}}
 		if _, err := f.Manifest(); err == nil || !strings.Contains(err.Error(), tc.want) {

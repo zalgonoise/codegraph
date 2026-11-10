@@ -120,6 +120,8 @@ type EndpointRef struct {
 	Transport string   `json:"transport"`
 	Role      string   `json:"role"`
 	Key       string   `json:"key"`
+	Access    string   `json:"access,omitempty"`   // a store: read, write or read-write
+	Database  string   `json:"database,omitempty"` // a table: the database it is in, when the deployment says
 	Handler   string   `json:"handler,omitempty"`
 	Message   string   `json:"message,omitempty"`
 	Position  string   `json:"position,omitempty"` // the call site; for inbound endpoints, where the handler is registered
@@ -182,13 +184,16 @@ func (r *Run) ref(i int) JourneyRef {
 func (r *Run) endpointRef(service, id string) EndpointRef {
 	ep := r.endpoints[service+"|"+id]
 	ref := EndpointRef{Service: service, Direction: string(ep.Direction), Transport: ep.Transport, Role: ep.Role,
-		Key: keys(ep), Handler: ep.Handler, Message: ep.Message, Position: ep.Position}
+		Key: keys(ep), Access: ep.Access, Handler: ep.Handler, Message: ep.Message, Position: ep.Position}
 	if len(ep.Sites) > 1 {
 		for _, s := range ep.Sites {
 			ref.Sites = append(ref.Sites, s.Position)
 		}
 	}
 	ref.Reason, ref.Unmatched = r.dangling[service+"|"+id]
+	if dbs := r.databases(service); ep.Transport == "sql" && ep.Role == "query" && ep.Owner == "" && len(dbs) == 1 {
+		ref.Database = dbs[0].String()
+	}
 	return ref
 }
 
@@ -197,7 +202,8 @@ func (r *Run) endpointRef(service, id string) EndpointRef {
 // JourneyDetail is the answer of Journey.
 type JourneyDetail struct {
 	JourneyRef
-	Kind       string            `json:"kind"` // sync for routes and methods, async for consumers
+	Kind       string            `json:"kind"`               // sync for routes and methods, async for consumers
+	Schedule   string            `json:"schedule,omitempty"` // when a deployment runs it on a schedule
 	Components []string          `json:"components"`
 	Uses       []model.SymbolUse `json:"uses,omitempty"`   // the libraries' exported API its own code calls
 	UsedBy     []JourneyUse      `json:"usedBy,omitempty"` // a library's exported symbol: the journeys calling it
@@ -211,6 +217,7 @@ type Step struct {
 	Transport  string `json:"transport"`
 	Role       string `json:"role"`
 	Key        string `json:"key"`
+	Access     string `json:"access,omitempty"` // a store: read, write or read-write
 	Kind       string `json:"kind"`
 	Position   string `json:"position,omitempty"` // the call site, in the calling service's repository
 	Background bool   `json:"background,omitempty"`
@@ -219,6 +226,7 @@ type Step struct {
 	Journey    string `json:"journey,omitempty"` // the journey it continues into
 	Handler    string `json:"handler,omitempty"`
 	HandlerAt  string `json:"handlerAt,omitempty"` // the target handler's position, in the target's repository
+	Schedule   string `json:"schedule,omitempty"`  // the target journey's, when a deployment runs it on a schedule
 	Unmatched  string `json:"unmatched,omitempty"` // when nothing analysed answers it: why
 	Cycle      bool   `json:"cycle,omitempty"`     // the journey is already on the path
 	Repeated   bool   `json:"repeated,omitempty"`  // followed earlier in this answer
@@ -265,19 +273,23 @@ func (r *Run) Journey(service, key string, depth int) (*JourneyDetail, error) {
 			key, m.Service, strings.Join(names, "; "))
 	}
 	i := exact[0]
-	d := &JourneyDetail{JourneyRef: r.ref(i), Kind: r.endpoints[m.Service+"|"+r.journeys[i].j.Entrypoint].InteractionKind()}
+	d := &JourneyDetail{JourneyRef: r.ref(i), Kind: r.endpoints[m.Service+"|"+r.journeys[i].j.Entrypoint].InteractionKind(),
+		Schedule: r.System.Schedules[m.Service+"|"+r.journeys[i].j.Key]}
 	for _, c := range r.journeys[i].j.Components {
 		d.Components = append(d.Components, symbols.Short(c, m.Module))
 	}
 	d.Uses = r.journeys[i].j.Uses
 	d.UsedBy = r.apiUsers[i]
 	budget := maxSteps
-	d.Steps = r.steps(i, 1, max(depth, 0)+1, map[int]bool{i: true}, map[int]int{i: 0}, &budget)
+	d.Steps = r.steps(i, 1, max(depth, 0)+1, map[int]bool{i: true}, map[int]int{i: 0}, &budget, false)
 	d.Truncated = budget < 0
 	return d, nil
 }
 
-func (r *Run) steps(i, depth, maxDepth int, path map[int]bool, done map[int]int, budget *int) []Step {
+// steps follows journey i's outbound calls into the journeys they continue
+// into. Past a table hand-off (viaTable) no other is taken, and a journey
+// never hands over to itself, as when linking (link.chain).
+func (r *Run) steps(i, depth, maxDepth int, path map[int]bool, done map[int]int, budget *int, viaTable bool) []Step {
 	jr := r.journeys[i]
 	var out []Step
 	for _, o := range jr.j.Outbound {
@@ -288,24 +300,29 @@ func (r *Run) steps(i, depth, maxDepth int, path map[int]bool, done map[int]int,
 		if *budget--; *budget < 0 {
 			return out
 		}
-		base := Step{Transport: ep.Transport, Role: ep.Role, Key: keys(ep), Kind: o.Kind, Position: ep.Position,
-			Background: o.Background}
-		conts := r.next(jr.service, o.Endpoint)
-		if len(conts) == 0 {
-			base.Unmatched = r.unmatched(jr.service, ep)
-			out = append(out, base)
-			continue
-		}
-		for _, c := range conts {
+		base := Step{Transport: ep.Transport, Role: ep.Role, Key: keys(ep), Access: ep.Access, Kind: o.Kind,
+			Position: ep.Position, Background: o.Background}
+		stepped := false
+		for _, c := range r.next(jr.service, o.Endpoint) {
+			table := model.Store(c.Transport)
+			if table && viaTable {
+				continue
+			}
 			s := base
 			s.To, s.Key, s.Kind, s.Confidence = c.To, c.Key, c.Kind, c.Confidence
 			if len(c.journeys) == 0 {
+				stepped = true
 				out = append(out, s)
 				continue
 			}
 			for _, t := range c.journeys {
+				if t == i {
+					continue // a job writing what it reads itself
+				}
+				stepped = true
 				ts := s
 				ts.Journey, ts.Handler, ts.HandlerAt = r.journeys[t].j.Key, r.journeys[t].j.Handler, r.ref(t).Position
+				ts.Schedule = r.System.Schedules[c.To+"|"+ts.Journey]
 				d, seen := done[t]
 				switch {
 				case path[t]:
@@ -316,11 +333,15 @@ func (r *Run) steps(i, depth, maxDepth int, path map[int]bool, done map[int]int,
 					ts.Deeper = true
 				default:
 					path[t], done[t] = true, depth
-					ts.Steps = r.steps(t, depth+1, maxDepth, path, done, budget)
+					ts.Steps = r.steps(t, depth+1, maxDepth, path, done, budget, viaTable || table)
 					delete(path, t)
 				}
 				out = append(out, ts)
 			}
+		}
+		if !stepped {
+			base.Unmatched = r.unmatched(jr.service, ep)
+			out = append(out, base)
 		}
 	}
 	return out
@@ -331,7 +352,7 @@ func (r *Run) unmatched(service string, ep model.Endpoint) string {
 	switch reason := r.dangling[service+"|"+ep.ID]; {
 	case reason != "":
 		return reason
-	case ep.Transport == "sql" || ep.Transport == "redis":
+	case model.Store(ep.Transport):
 		return "store"
 	case ep.Role == "producer":
 		return "no consumer among the analysed services"
@@ -349,7 +370,7 @@ type KeyUsers struct {
 	Key       string `json:"key"`
 	Senders   []Use  `json:"senders"`   // producers and clients
 	Receivers []Use  `json:"receivers"` // consumers and servers
-	Users     []Use  `json:"users"`     // stores: queries
+	Users     []Use  `json:"users"`     // stores: queries, each with its access when known
 }
 
 // Use is an endpoint of a key and the journeys using it, or starting there.
@@ -387,7 +408,7 @@ func (r *Run) Who(key string) []KeyUsers {
 			}
 		}
 		switch {
-		case ep.Transport == "sql" || ep.Transport == "redis":
+		case model.Store(ep.Transport):
 			ku.Users = append(ku.Users, use)
 		case ep.Direction == model.Inbound:
 			ku.Receivers = append(ku.Receivers, use)

@@ -2,15 +2,10 @@ package link
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/zalgonoise/codegraph/internal/model"
 )
-
-// messaging transports carry named topics or queues, so the same name on two
-// of them is the same channel in transition (Kafka topics moving to RabbitMQ).
-var messaging = map[string]bool{"kafka": true, "amqp": true, "nats": true}
 
 // brokerQueue matches the queues a broker library feeds itself:
 // <queue>.retry and <queue>.dlq, and delayed retries (<queue>.delay.<ttl>).
@@ -22,7 +17,7 @@ func classify(sys *model.System, ms []*model.Manifest) {
 	for _, m := range ms {
 		byService[m.Service] = m
 	}
-	others := messagingTransports()
+	others := model.MessagingTransports()
 	for i, d := range sys.Dangling {
 		m := byService[d.Service]
 		if m == nil {
@@ -37,26 +32,17 @@ func classify(sys *model.System, ms []*model.Manifest) {
 	}
 }
 
-func messagingTransports() []string {
-	var out []string
-	for t := range messaging {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // unlinkedKeys reports the keys nothing answers of the messaging endpoints that
 // link through their other keys (a consumer registering several queues, one of
 // them never published to): one partial entry per reason, keys in order.
 // Without it, a registration linked by one queue hid every other one.
 func unlinkedKeys(ms []*model.Manifest, matchedIn, matchedOut map[string]bool) []model.Dangling {
-	others := messagingTransports()
+	others := model.MessagingTransports()
 	var out []model.Dangling
 	for _, m := range ms {
 		for _, ep := range m.Endpoints {
 			id := m.Service + "|" + ep.ID
-			if !messaging[ep.Transport] || len(ep.Keys) < 2 || !matchedIn[id] && !matchedOut[id] {
+			if !model.Messaging(ep.Transport) || len(ep.Keys) < 2 || !matchedIn[id] && !matchedOut[id] {
 				continue
 			}
 			var order []string
@@ -98,7 +84,7 @@ func reason(ms []*model.Manifest, owner *model.Manifest, ep model.Endpoint, othe
 	if counterpart(owner, owner, ep, ep.Transport) {
 		return model.DanglingSameService
 	}
-	if !messaging[ep.Transport] {
+	if !model.Messaging(ep.Transport) {
 		return ""
 	}
 	broker := len(ep.Keys) > 0
@@ -108,6 +94,8 @@ func reason(ms []*model.Manifest, owner *model.Manifest, ep model.Endpoint, othe
 	if broker {
 		return model.DanglingBroker
 	}
+	// The same name on another messaging transport is the same channel in
+	// transition (Kafka topics moving to RabbitMQ).
 	for _, t := range others {
 		if t == ep.Transport {
 			continue

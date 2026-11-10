@@ -255,7 +255,7 @@ func Write(w io.Writer, r *Run, opts Options) (*Metadata, error) {
 			return nil, err
 		}
 	}
-	page, err := render.Explorer(link.Link(ms), ms, dep)
+	page, err := render.Explorer(link.LinkWith(ms, dep.LinkOptions()), ms, dep)
 	if err != nil {
 		return nil, err
 	}
@@ -512,12 +512,19 @@ func dropKeys(v any) any {
 }
 
 // hideSettings leaves out the values an environment configures: every
-// container's variables keep their names, the address check's settings and
-// the mocks keep their names only.
+// container's variables keep their names, its databases their names but not
+// their instances (from host names), the address check's settings and the
+// mocks their names only.
 func hideSettings(d *deploy.Deployment) {
 	for i := range d.Workloads {
 		for j := range d.Workloads[i].Containers {
 			c := &d.Workloads[i].Containers[j]
+			if c.Databases == nil {
+				c.Databases = c.DatabasesOf()
+			}
+			for k := range c.Databases {
+				c.Databases[k].Instance = ""
+			}
 			for k := range c.Env {
 				c.Env[k] = ""
 			}

@@ -44,7 +44,13 @@ func (r *Result) LinksChanged() bool { return !r.Links.empty() }
 
 // Compare links both runs and compares them.
 func Compare(base, head []*model.Manifest) *Result {
-	bs, hs := link.Link(base), link.Link(head)
+	return CompareWith(base, head, link.Options{}, link.Options{})
+}
+
+// CompareWith links both runs with what each knows beyond its manifests (its
+// deployment's databases) and compares them.
+func CompareWith(base, head []*model.Manifest, bo, ho link.Options) *Result {
+	bs, hs := link.LinkWith(base, bo), link.LinkWith(head, ho)
 	r := &Result{BaseServices: len(base), HeadServices: len(head), Endpoints: map[string]Delta[string]{},
 		endpointCounts: map[string]int{}}
 	bn, hn := names(base), names(head)
@@ -114,10 +120,9 @@ func Signature(ep model.Endpoint) string {
 // orphans lists the messaging endpoints nothing analysed answers, with no
 // reason not to be orphans and a resolved key.
 func orphans(s *model.System) map[string]bool {
-	messaging := map[string]bool{"kafka": true, "amqp": true, "nats": true}
 	out := map[string]bool{}
 	for _, d := range s.Dangling {
-		if d.Reason == "" && messaging[d.Transport] && d.Key != model.Unknown {
+		if d.Reason == "" && model.Messaging(d.Transport) && d.Key != model.Unknown {
 			out[fmt.Sprintf("%s %s %s %s", d.Service, d.Transport, d.Role, d.Key)] = true
 		}
 	}

@@ -45,5 +45,17 @@
     "pkgs": ["example.com/inhouse/rabbitbus/ports", "example.com/inhouse/rabbitbus/rabbitmq"], "recv": "Publisher|BrokerRepository|RabbitMQ",
     "funcs": ["Publish"], "keyArgs": [2],
     "keyDefault": {"funcs": ["New"], "arg": 1, "field": "PriorityQueue"}
+  },
+  {
+    "name": "tubequeue-put",
+    "transport": "beanstalkd", "role": "producer", "direction": "outbound",
+    "pkgs": ["example.com/inhouse/tubequeue"], "recv": "Client", "funcs": ["Put"],
+    "keyArgs": [2]
+  },
+  {
+    "name": "tubequeue-watch",
+    "transport": "beanstalkd", "role": "consumer", "direction": "inbound",
+    "pkgs": ["example.com/inhouse/tubequeue"], "recv": "Client", "funcs": ["WatchTube"],
+    "keyArgs": [2], "handlerArgs": [3], "handlerMethods": ["Work"]
   }
 ]

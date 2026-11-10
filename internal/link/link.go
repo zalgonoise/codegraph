@@ -15,7 +15,11 @@
 // SQL tables and Redis key patterns used by services of different modules
 // become "shared-store" links with confidence "name-only": the name is the
 // only evidence that it is the same database or Redis. Mains of one module
-// sharing their stores is the normal case and not reported.
+// sharing their stores is the normal case and not reported. When the
+// deployment says which database each service uses (Options.Databases), a
+// table is that database's: the data flows from the services writing it to
+// those reading it (async links, confidence "same-database"), also within a
+// module, and one name in two databases is two tables.
 //
 // Unmatched endpoints are dangling, with a reason when they are not orphans:
 // a counterpart in the same service, a broker-fed retry or dead-letter queue,
@@ -35,10 +39,23 @@ import (
 	"github.com/zalgonoise/codegraph/internal/model"
 )
 
+// Options are what linking knows beyond the manifests.
+type Options struct {
+	// Databases are the databases each service is configured with (by a
+	// deployment): a service with exactly one has its tables there.
+	Databases map[string][]model.Database
+	// Jobs are the programs a deployment runs on a schedule: their journeys
+	// are continued into from the journeys writing what they read.
+	Jobs []model.Job
+}
+
 // Link builds the system graph. Libraries (Manifest.Library) are listed as
 // services but never linked: their endpoints are what their API can do, not
 // what runs.
-func Link(all []*model.Manifest) *model.System {
+func Link(all []*model.Manifest) *model.System { return LinkWith(all, Options{}) }
+
+// LinkWith builds the system graph with what opts adds.
+func LinkWith(all []*model.Manifest, opts Options) *model.System {
 	sys := &model.System{}
 	var ms []*model.Manifest
 	for _, m := range all {
@@ -118,7 +135,7 @@ func Link(all []*model.Manifest) *model.System {
 	}
 	classify(sys, ms)
 	sys.Dangling = append(sys.Dangling, unlinkedKeys(ms, matchedIn, matchedOut)...)
-	sys.Links = append(sys.Links, sharedStores(ms)...)
+	sys.Links = append(sys.Links, sharedStores(ms, opts.Databases)...)
 
 	sort.SliceStable(sys.Links, func(i, j int) bool {
 		a, b := sys.Links[i], sys.Links[j]
@@ -130,7 +147,8 @@ func Link(all []*model.Manifest) *model.System {
 		}
 		return a.Key < b.Key
 	})
-	sys.Journeys, sys.Continuations = chain(ms, byOut, maxHops)
+	sys.Schedules = schedules(ms, opts.Jobs)
+	sys.Journeys, sys.Continuations = chain(ms, byOut, maxHops, flows{databases: opts.Databases, scheduled: sys.Schedules})
 	return sys
 }
 
@@ -341,10 +359,12 @@ func matchPath(route, p string) bool {
 }
 
 // hasLiteralSegment reports whether a path has a segment that is neither
-// empty nor partly unresolved.
+// empty, partly unresolved, nor a route parameter (":id", "{id}"): a route of
+// parameters only, such as "/:account/:queue", would match any path of its
+// length.
 func hasLiteralSegment(p string) bool {
 	for _, seg := range strings.Split(p, "/") {
-		if seg != "" && !strings.Contains(seg, model.Unknown) {
+		if seg != "" && !strings.Contains(seg, model.Unknown) && !strings.HasPrefix(seg, ":") && !strings.HasPrefix(seg, "{") {
 			return true
 		}
 	}
@@ -374,46 +394,97 @@ func named(key string) bool {
 	return strings.ContainsFunc(key, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) })
 }
 
-func sharedStores(ms []*model.Manifest) []model.Link {
-	type user struct{ service, module, owner string }
+// sharedStores links the services that use the same table or cache key.
+//
+// A table of a service with exactly one database (dbs) is that database's:
+// services of different databases do not share it, and services of one do,
+// also within a module (a server and the jobs of its repository). When both
+// say what they do with it, the data flows from writer to reader: an async
+// link keyed "<database>.<table>", confidence same-database, from each service
+// writing it to each other reading it, none between readers alone or writers
+// alone. When either does not say (an access unknown), they share it.
+//
+// Otherwise a table or key is shared by the services of different modules
+// using its name, confidence name-only. Files (transport storage) are not
+// linked by name: a file name is a pattern such as "*/*.pdf", not the bucket
+// that holds it.
+func sharedStores(ms []*model.Manifest, dbs map[string][]model.Database) []model.Link {
+	type user struct {
+		service, module, owner string
+		db                     *model.Database // for a table: the service's only database
+		access                 string          // what its endpoints do with the store, combined
+		unknown                bool            // an endpoint of it does not say
+	}
 	type store struct{ transport, key string }
-	users := map[store][]user{}
+	users := map[store][]*user{}
+	byID := map[store]map[string]*user{}
 	for _, m := range ms {
-		seen := map[user]map[store]bool{}
+		var db *model.Database
+		if d := dbs[m.Service]; len(d) == 1 {
+			db = &d[0]
+		}
 		for _, ep := range m.Endpoints {
-			if (ep.Transport != "sql" && ep.Transport != "redis") || ep.Role != "query" {
+			if !model.Store(ep.Transport) || ep.Transport == "storage" || ep.Role != "query" {
 				continue
-			}
-			u := user{m.Service, m.Module, ep.Owner}
-			if seen[u] == nil {
-				seen[u] = map[store]bool{}
 			}
 			for _, k := range ep.Keys {
 				st := store{ep.Transport, k}
-				if named(k) && !seen[u][st] {
-					seen[u][st] = true
+				if !named(k) {
+					continue
+				}
+				if byID[st] == nil {
+					byID[st] = map[string]*user{}
+				}
+				u := byID[st][m.Service+"|"+ep.Owner]
+				if u == nil {
+					u = &user{service: m.Service, module: m.Module, owner: ep.Owner}
+					if ep.Transport == "sql" && ep.Owner == "" {
+						u.db = db
+					}
+					byID[st][m.Service+"|"+ep.Owner] = u
 					users[st] = append(users[st], u)
 				}
+				u.access = model.Accesses(u.access, ep.Access)
+				u.unknown = u.unknown || ep.Access == ""
 			}
 		}
 	}
 	// A store with an owner (a declared service's table in another repository's
 	// database) is shared with that repository's services, and with services
 	// declaring the same owner, only.
-	owns := func(a, b user) bool { return a.owner == "" || a.owner == repoName(b.module) || a.owner == b.owner }
+	owns := func(a, b *user) bool { return a.owner == "" || a.owner == repoName(b.module) || a.owner == b.owner }
 	var out []model.Link
 	for st, us := range users {
 		sort.Slice(us, func(i, j int) bool { return us[i].service < us[j].service })
 		linked := map[[2]string]bool{}
-		for i := 0; i < len(us); i++ {
-			for j := i + 1; j < len(us); j++ {
-				pair := [2]string{us[i].service, us[j].service}
-				if us[i].module == us[j].module || linked[pair] || !owns(us[i], us[j]) || !owns(us[j], us[i]) {
+		for i, a := range us {
+			for j, b := range us {
+				pair := [2]string{a.service, b.service}
+				if a.service == b.service || linked[pair] {
+					continue
+				}
+				if a.db != nil && b.db != nil {
+					switch {
+					case !a.db.Same(*b.db):
+					case !a.unknown && !b.unknown:
+						if model.Writes(a.access) && model.Reads(b.access) {
+							linked[pair] = true
+							out = append(out, model.Link{From: a.service, To: b.service, Transport: st.transport,
+								Key: a.db.Name + "." + st.key, Kind: model.Async, Confidence: "same-database"})
+						}
+					case i < j:
+						linked[pair] = true
+						out = append(out, model.Link{From: a.service, To: b.service, Transport: st.transport,
+							Key: a.db.Name + "." + st.key, Kind: "shared-store", Confidence: "same-database"})
+					}
+					continue
+				}
+				if i > j || a.module == b.module || !owns(a, b) || !owns(b, a) {
 					continue
 				}
 				linked[pair] = true
 				out = append(out, model.Link{
-					From: us[i].service, To: us[j].service, Transport: st.transport, Key: st.key,
+					From: a.service, To: b.service, Transport: st.transport, Key: st.key,
 					Kind: "shared-store", Confidence: "name-only",
 				})
 			}

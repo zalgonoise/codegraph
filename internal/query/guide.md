@@ -63,11 +63,11 @@ codegraph query -run $R [-json] [-depth N] [-diagram] <command> [args]
     method's journey runs the library's implementations). Libraries are never linked: what their journeys reach is
     what the API can do, not what any service runs. `<name>-api` is the API of a repository that also has a program.
     The symbols of a library's internal packages (role `internal`) are listed apart, under "Internal API".
-- **Endpoint:** something a service exposes or uses, made of transport (http, grpc, kafka, amqp = RabbitMQ, nats, sql,
-  redis), role (server, client, producer, consumer, query) and key (route, gRPC service or method, topic, queue,
-  table, Redis key pattern).
-- **Journey:** what happens when an inbound endpoint is hit: an HTTP route, a gRPC method, a consumed topic or queue,
-  or a Redis subscription. It is named by transport and key, since one key can start a journey on two transports
+- **Endpoint:** something a service exposes or uses, made of transport (http, grpc, kafka, amqp = RabbitMQ, nats,
+  beanstalkd, sql, redis, storage = files), role (server, client, producer, consumer, query) and key (route, gRPC
+  service or method, topic, queue, tube, table, Redis key pattern, file name).
+- **Journey:** what happens when an inbound endpoint is hit: an HTTP route, a gRPC method, a consumed topic, queue or
+  tube, or a Redis subscription. It is named by transport and key, since one key can start a journey on two transports
   (`journey <service> amqp <key>` picks one). Its outbound calls are in program order, and it continues into the
   journey of the endpoint each call links to.
   - Every service also has a **main journey** (`journey <service> main`, transport `main`): what its `main` does
@@ -80,7 +80,11 @@ codegraph query -run $R [-json] [-depth N] [-diagram] <command> [args]
 - **Link:** an outbound endpoint matched to another service's inbound one.
   - Kind is `sync` (a call) or `async` (a message).
   - Confidence: `exact`; `pattern` (wildcards); `path-only` (HTTP host unknown); `name-only` (a table or Redis key
-    used by two repositories, only the name is shared).
+    used by two repositories, only the name is shared); `same-database` (a table of one database, as the deployment
+    configures the services: from the services writing it to those reading it, keyed `<database>.<table>`).
+  - A journey writing such a table continues into the journeys that read it on their own: jobs a deployment runs
+    on a schedule (`runs on schedule`), workers' main journeys, main journeys' goroutines. Not into routes, methods
+    or consumers reading it on request. One such hand-off per chain.
 - **Unmatched endpoint:** one no analysed service answers. A reason says why it is not an orphan: `same-service`,
   `broker` (retry, delay or dead-letter queues), `other-transport` (the same name on another messaging transport). A
   topic or queue without a reason is answered by nothing analysed: a repository that was not analysed, or something
@@ -89,7 +93,9 @@ codegraph query -run $R [-json] [-depth N] [-diagram] <command> [args]
 
 ## Annotations in answers
 
-- **store:** a table or Redis key the journey uses.
+- **store:** a table, Redis key or file the journey uses, with what it does when known: `read`, `write` or
+  `read-write` (`who <table>` lists writers and readers apart). Files (`storage`) are not linked by name: a name such as
+  `*/*.pdf` does not say which bucket holds it.
 - **outside the analysed services:** a call to something not in the run (another repository, another language, an
   external API).
 - **no consumer among the analysed services:** a message nothing analysed receives.

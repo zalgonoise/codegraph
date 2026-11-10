@@ -35,6 +35,8 @@ func TestRuleValidation(t *testing.T) {
 		{Name: "bad-transform", Transport: "sql", Direction: model.Outbound, Transform: "tables"},
 		{Name: "bad-recv", Transport: "grpc", Direction: model.Outbound, RecvPattern: "("},
 		{Name: "bad-method", Transport: "kafka", Direction: model.Outbound, KeyMethods: []MethodRef{{Arg: 2}}},
+		{Name: "bad-access", Transport: "sql", Direction: model.Outbound, Access: "delete"},
+		{Name: "bad-access-func", Transport: "sql", Direction: model.Outbound, AccessFuncs: map[string]string{"Get": "statement"}},
 	} {
 		if err := r.compile(); err == nil {
 			t.Errorf("%s: compiled without error", r.Name)
@@ -155,6 +157,54 @@ func TestTableNames(t *testing.T) {
 	want := "daily_balance_snapshots,orders,receipts,*,*"
 	if strings.Join(got, ",") != want {
 		t.Errorf("tableNames = %v, want %s", got, want)
+	}
+}
+
+// The tables of a statement, without the words an UPDATE follows when it
+// names none: a locking read and an upsert's assignments.
+func TestSQLTables(t *testing.T) {
+	got := sqlTables([]string{
+		"SELECT id FROM jobs WHERE state = ? FOR UPDATE SKIP LOCKED",
+		"INSERT INTO `audit` (id, status) VALUES (?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status)",
+		"UPDATE Orders o JOIN customers c ON c.id = o.customer_id SET o.vip = c.vip",
+		"SELECT * FROM *",
+	})
+	want := "jobs,audit,orders,customers,*"
+	if strings.Join(got, ",") != want {
+		t.Errorf("sqlTables = %v, want %s", got, want)
+	}
+}
+
+// A statement writes the table its verb targets and reads the others.
+func TestSQLAccess(t *testing.T) {
+	for _, c := range []struct {
+		stmts []string
+		want  map[string]string
+	}{
+		{[]string{"SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id"},
+			map[string]string{"orders": model.Read, "customers": model.Read}},
+		{[]string{"INSERT INTO archive SELECT * FROM orders WHERE created < ?"},
+			map[string]string{"archive": model.Write, "orders": model.Read}},
+		{[]string{"UPDATE orders o JOIN customers c ON c.id = o.customer_id SET o.vip = c.vip"},
+			map[string]string{"orders": model.Write, "customers": model.Read}},
+		{[]string{"DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE disabled)"},
+			map[string]string{"sessions": model.Write, "users": model.Read}},
+		{[]string{"WITH due AS (SELECT id FROM invoices WHERE due < now()) UPDATE invoices SET late = true WHERE id IN (SELECT id FROM due)"},
+			map[string]string{"invoices": model.ReadWrite, "due": model.Read}},
+		{[]string{"  (SELECT 1 FROM checkpoints)"}, map[string]string{"checkpoints": model.Read}},
+		{[]string{"SELECT * FROM jobs FOR UPDATE", "UPDATE jobs SET state = 'done'"}, map[string]string{"jobs": model.ReadWrite}},
+		{[]string{"* FROM orders"}, map[string]string{"orders": ""}}, // an unresolved verb says nothing
+	} {
+		got := sqlAccess(c.stmts)
+		if len(got) != len(c.want) {
+			t.Errorf("%q: %v, want %v", c.stmts, got, c.want)
+			continue
+		}
+		for table, a := range c.want {
+			if got[table] != a {
+				t.Errorf("%q: %s is %q, want %q", c.stmts, table, got[table], a)
+			}
+		}
 	}
 }
 

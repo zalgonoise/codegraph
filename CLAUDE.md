@@ -7,9 +7,10 @@ users.
 ## Start here
 
 1. **Verify:** `make test` (`gofmt -l . && go vet ./... && go test ./...`). The golden test `cmd/codegraph/main_test.go`
-   runs the seven samples (orders, inventory, ledger, billing, gateway, tool, pipeline), the library sample (mailer)
+   runs the eight samples (orders, inventory, ledger, billing, gateway, tool, pipeline, queue), the library sample (mailer)
    and the declared sample (`testdata/declared/notifier.json`); `cmd/codegraph/pipeline_test.go` runs a configuration
    file's pipeline over git clones of two samples, four times (reuse, a new commit, `-full`);
+   `TestDataFlows` analyses `testdata/payouts`, deploys its `deploy.yaml` and links them;
    `cmd/codegraph/commands_test.go` checks the commands' names and short forms; unit tests cover
    `internal/bundle`, `config`, `configfile`, `declared`, `deploy`, `diff`, `incremental`, `inventory`, `library`,
    `link`, `mcpserver`, `model`, `options`, `pipeline`, `profile`, `query`, `render`, `resolve`, `settings` and
@@ -19,9 +20,9 @@ users.
    directory, kept in a repository of its own (README "Profiles"). `codegraph run <step> -profile <dir>`, `make
    <target> PROFILE=<dir>` (or a profile's own Makefile) or a pipeline of `~/.codegraph.yaml` runs with it. `make
    audit` with a profile's denylist checks that no file here names the organisation.
-3. **Planned work** is in "Next" below, in order; continue from the first item not marked done. As of 2026-11-05
-   every item is done but 10 (an HTTP MCP server, planned: settle its open points with the user first); ask the user
-   what comes next.
+3. **Planned work** is in "Next" below, in order; continue from the first item not marked done. As of 2026-11-06,
+   items 12 to 15 (asked that day: journeys that continue through tables and scheduled jobs) are done; 10 (an HTTP
+   MCP server) is still planned, its open points to settle with the user first; ask the user what comes next.
 4. **The analysed repositories are read-only.** Run with `GOFLAGS=-mod=readonly`; `make graph` checks every clone's
    `git status` before and after. Never write output into them; outputs go to `tmp/` (git-ignored) or a profile's
    `tmp/`.
@@ -58,6 +59,9 @@ go run ./cmd/codegraph analyze -dir testdata/gateway -out /tmp/samples
 go run ./cmd/codegraph analyze -dir testdata/tool -entry ./cmd/... -out /tmp/samples
 go run ./cmd/codegraph analyze -dir testdata/mailer -library -out /tmp/samples
 go run ./cmd/codegraph analyze -dir testdata/pipeline -out /tmp/samples
+go run ./cmd/codegraph analyze -dir testdata/queue -entry ./cmd/... -rules testdata/rules/inhouse.json -out /tmp/samples
+go run ./cmd/codegraph analyze -dir testdata/payouts -entry ./cmd/... -out /tmp/samples
+go run ./cmd/codegraph deploy -rendered testdata/payouts/deploy.yaml -run /tmp/samples -out /tmp/samples/deploy
 go run ./cmd/codegraph link -out /tmp/samples/_system /tmp/samples/*/manifest.json
 go run ./cmd/codegraph query -run /tmp/samples journey orders "POST /orders"
 ```
@@ -122,7 +126,7 @@ configfile + profile → options (layers) → pipeline → fleet (+ incremental)
 | `internal/configfile` | `.codegraph.yaml`: `Find` (-config, `$CODEGRAPH_CONFIG`, the current directory, the home directory), `Read` (profiles, `profile`, `default`, `query`, `pipelines` of `Step`s), trust (`Trusted`: not from the current directory), `Template` for `codegraph init` |
 | `internal/pipeline` | `codegraph run`: `Resolve` (a pipeline or a built-in step, its profile, its option layers, its trust), `Runner` (the steps through `Dispatch`, codegraph's own command dispatch, so `-dry-run` prints them as commands; the summary), `Repositories`, `QueryRun` (the run query and mcp read without `-run`); `Describe`, `Get`, `Check` and `Status` for `config`, `check` and `status` |
 | `internal/incremental` | `fleet -reuse`: `Toolchain` (the executable's SHA-256 and `go env`), `Key` (the git tree of the repository's directory, settings, rule files; none with uncommitted changes, outside git, or a local `replace`), `Record` (`fleet.json`: each repository's commit, key and services, and the link's counts), `Copy` |
-| `testdata/stubs/*` | Offline stand-ins for grpc, grpc-gateway's runtime (`gateway`), gorm (+ mysql driver), chi, iris, cobra, zalgonoise/x/cli v2 (`xcli`), kelseyhightower/envconfig, and in-house style libraries (`kafkabus` for Kafka, `rabbitbus` for RabbitMQ, `kvcache` for Redis) and a `*-sdk-go`, wired into the samples with `replace` |
+| `testdata/stubs/*` | Offline stand-ins for grpc, grpc-gateway's runtime (`gateway`), gorm (+ mysql driver), chi, iris, cobra, zalgonoise/x/cli v2 (`xcli`), kelseyhightower/envconfig, kr/beanstalk (`beanstalk`), mikegleasonjr/workers (`beanstalk-workers`), and in-house style libraries (`kafkabus` for Kafka, `rabbitbus` for RabbitMQ, `kvcache` for Redis, `tubequeue` for beanstalkd, its handlers behind an adapter) and a `*-sdk-go`, wired into the samples with `replace` |
 | `testdata/rules/inhouse.json` | Rules for the in-house style stubs: what an organisation's profile holds for its own libraries |
 
 Outputs per service in `<out>/<service>/`: `manifest.json`, `service.mmd`, `service.dot`, `report.md` (with a
@@ -213,6 +217,100 @@ journey that reaches another service (a summary and the first steps above `maxSe
     (`localAddress`: `:8082`, `127.0.0.1:50051`, `http://localhost:8080`, development placeholders).
   - A key of several arguments skips an empty first part: amqp091's `PublishWithContext(ctx, "", queue, …)` (the
     default exchange) is keyed by the queue alone, not `" queue"`.
+- **Transport families** (`model.Messaging`, `model.MessagingTransports`, `model.Store`, 2026-11-06): messaging
+  transports (kafka, amqp, nats, beanstalkd) carry named topics, queues or tubes; store transports (sql, redis,
+  storage) hold named data. Every check by family goes through them (dangling reasons, orphans, `diff`, `context.md`,
+  the frontier's topics, the answers' and diagrams' store shapes: Redis keys are cylinders too since then); the
+  explorer has its own `MESSAGING` and `STORES` sets, kept equal. `query`'s `transports` (the first word of a qualified
+  journey key) lists them all.
+- **beanstalkd and storage** (2026-11-06): built-in rules for kr/beanstalk (`Tube.Put` keyed by the receiver's `Name`
+  field, `NewTubeSet(conn, names...)` a consumer rooted at its caller, `Dial` a dial) and mikegleasonjr/workers
+  (`WorkMux.Handle(tube, handler)`, method `Work`). `storage` (files: an in-house S3 or SFTP client, described by a
+  profile's rules, role `query`, keyed by file name) is a store transport that `sharedStores` skips: a file name such
+  as `*/*.pdf` is a pattern, not the bucket holding it (item 14 qualifies it). The inventory reports the beanstalkd
+  libraries, and its Kafka-to-RabbitMQ summary counts RabbitMQ libraries only (every non-Kafka library used to count
+  as RabbitMQ).
+- **Library adapters** (2026-11-06): `handlersFromCall` follows a library call's arguments of the result's own type
+  (middleware), else those whose interface has one of the registration's `handlerMethods` (`hasMethod`): an
+  in-house queue's `AdaptHandler(h Handler) workers.Handler` runs `h.Work(id, body)` for the mux's `Work(job)`. The
+  detector names such an endpoint after the method it runs, `tubequeue.AdaptHandler((*main.results).Work)`, like a
+  wrapped handler: a single root that is a named function (no `Parent`) replaces the label's `…`.
+- **Store access** (`Endpoint.Access`, item 13, 2026-11-06): `read`, `write` or `read-write` (`model.Accesses`
+  combines several; `model.Reads`, `model.Writes`), from the rule: `Access` fixed or `statement`, `AccessFuncs` by
+  the called function's name, `Chain` for builders. `statement` (`byStatement`, `sqlAccess`): the SQL of the key
+  arguments, resolved again before the `sql-table` transform, table by table; a detection whose tables differ is split
+  into one per access. The written table is the one after the verb's keyword (`sqlTargets`: INSERT/REPLACE/MERGE
+  INTO, UPDATE, the first DELETE FROM); a SELECT (SHOW, DESCRIBE, EXPLAIN) reads all; WITH takes the first
+  INSERT/UPDATE/DELETE/MERGE after it, else is a SELECT; an unknown verb (`*`) gives no access. `sqlTableRefs` (also
+  `sqlTables`) skips an UPDATE after FOR or KEY (`FOR UPDATE SKIP LOCKED` named `skip` a table; `ON DUPLICATE KEY
+  UPDATE status = …` named `status`) and reads backquoted names. `Chain` (`Detector.chainAccess`): from the call's
+  value through its referrers: a call on it that `AccessFuncs` names gives its access; one that does not, returning
+  the same type, is followed (Where, Order, Session, Scopes); phis; functions it is passed to (their parameter, and
+  their result when of its type); a `Return` (the callers' results, `result` picks the Extract); a `MakeInterface` is
+  a subquery: read. Depth 3 (`maxChainDepth`) for helpers and callers. gorm's built-in map (`gormAccess`): `Create`,
+  `CreateInBatches`, `Save`, `Update(s)`, `UpdateColumn(s)`, `Delete` write; `First`, `Take`, `Last`, `Find`,
+  `FindInBatches`, `FirstOrInit`, `Scan`, `Count`, `Pluck`, `Row(s)` read; `FirstOrCreate` both; `gorm-model` matches
+  `Update(s)`, `UpdateColumn(s)`, `Count`, `Pluck` too (with a model argument; a column name gives no table and the
+  site is skipped). The access enters `EndpointID` when set (every SQL endpoint's ID changed once), is carried by
+  hops (`Hop.Access`), steps (`query.Step`), `EndpointRef`, the explorer's endpoints and declared endpoints
+  (`access`, role `query` only), labels say `SQL write` instead of `SQL query`, `who` and the explorer's key page
+  list "Written by", "Read by" (a read-write user in both) and "Used by" (unknown), `context.md`'s stores
+  as ``sql `orders` (read-write)``. Redis keys have no access yet.
+- **Databases from the deployment** (item 14, 2026-11-06): `deploy.databasesOf` pairs each variable naming a
+  database (`databaseVar`: a prefix, the family DB, DATABASE, MYSQL, MARIADB, POSTGRES or PG, then NAME, DATABASE
+  or, for POSTGRES, DB, then a suffix) with the HOST variable of the same prefix, family and suffix; the instance is
+  the host's first DNS label (`instanceOf`; an address or a single label as it is); values from secrets (`Secret`)
+  are unknown, so a secret name drops the database and a secret host its instance. `Container.Databases` is recorded
+  at deploy time; `Container.DatabasesOf` reads the variables of a deployment written before; `Deployment.Databases`
+  (nil-safe) gives each analysed service's, by `Container.Service`. Not filtered by the settings a main reads: those
+  miss variables some services read (a main reading `MARIADB_DATABASE` through a library; another's `AGENT_DB_*`), so
+  a filter would put tables in the wrong database. `link.LinkWith(ms, Options{Databases})` (`Link` without): in
+  `sharedStores`, a table of a service with exactly one database (no `Owner`) is that database's; per store and
+  service (and owner) one user, its accesses combined, `unknown` when any endpoint's is. Two users of one database
+  (`model.Database.Same`: the name, the instance when both know it): both known, an async link keyed
+  `<database>.<table>`, confidence `same-database`, from each writer to each other reader (none between readers
+  alone or writers alone); else one `shared-store`, `same-database`. Different databases: nothing. Either without
+  one: as before (different modules, `name-only`). Every link goes through it: `link -deploy`, `query.Load` (the
+  run's deployment), `diff.CompareWith` (each run's), bundles' explorer; the graph step's link after the deployment
+  writes every format of the run now, not only the explorer. Bundles `-no-settings` keep database names and drop
+  their instances (`hideSettings`). Shown in `query service` (each workload's databases), `who` (`EndpointRef.Database`
+  for a table of a service with one, "in database"), `context.md` ("Databases (deployment)"). Parked: buckets for
+  `storage` (production's chart names a bucket in two variables only; the in-house client builds the variable's name
+  from its arguments) and read replicas (an instance named apart from the one it copies does not match it).
+- **Hand-offs through tables and schedules** (item 15, 2026-11-06): `model.Job` (`Deployment.Jobs`: each main
+  container of a workload with a schedule, its command and args), `link.Options.Jobs`; `Deployment.LinkOptions`
+  (nil-safe) gives databases and jobs to every link. `schedules` resolves each job to a journey: the first word of
+  its command that is a `cli` journey key of the service, else `main`; several jobs on one journey join their
+  schedules. `System.Schedules` ("service|journey key"), `SystemJourney.Schedule`, `Hop.Schedule`, `query`'s
+  `JourneyDetail.Schedule` and `Step.Schedule`. `tableContinuations` (in `chain`, after the links' continuations):
+  readers are journeys reading a table (`model.Reads`, no `Owner`) of their service's only database that are
+  scheduled, or main journeys, whole when the service has no other inbound endpoint (a worker), else only their
+  `Background` outbound; every endpoint writing a table of its service's only database gets a continuation per
+  reader of the same database (`Database.Same`), link async `<database>.<table>`, `same-database`, `ToEndpoint` the
+  reader's entry. In `hops` (and `query`'s `steps`): a continuation into the journey being followed is skipped (a
+  job writing what it reads itself); `viaTable` lets a chain take one table hand-off, then skips store continuations
+  (measured on a 298-service run: without it, transitions logs written by every job led jobs into each other,
+  system journeys' hops 167k → 499k and system.json 84 → 288 MB; with it 338k and 182 MB, link memory 0.93 → 1.4 GB,
+  the explorer's page unchanged, 20.2 → 20.3 MB, as it expands from continuations); a hop through a table keeps the
+  table as its key. An endpoint whose continuations all lead back to its own journey stays an external store.
+- **HTTP routes of parameters only** (2026-11-06): `hasLiteralSegment` does not count `:id` or `{id}` segments, so a
+  client whose host is unknown no longer links to `/{id}` or `/:account/:queue` (any path of that length did).
+- **Run header and errors** (2026-11-06, asked by the user): `Runner.header` (`pipeline/header.go`) logs, before
+  the first step (as comments in a dry run's script), codegraph's version (`Runner.Version`, `buildVersion`), the
+  pipeline and its file (or "a step"), the profile (its name in the file, `profileName`, and directory), the steps
+  (an exec step as its command's base name), the input (root, with the graph step's repository count; only with a
+  graph or inventory step), the output (out, and the bundle with a bundle step) and `settings` (focus, api or
+  libraries, reuse or full, an algorithm other than vta, chart and environment, then counts of rule files,
+  included module patterns, declared services and checks); paths under home as `~`. Steps still stop the run at the
+  first failure (the user's choice). `shell` tees a command's standard error into `tailLines` (its last 30 lines,
+  `maxTail`) and fails with a `ShellError` carrying them; the summary renders them with `tailSummary`: JSON log
+  records keep ERROR and WARN only, as `LEVEL msg (k=v, …)`, an object attribute one `key: value` line per entry,
+  and such a record (a summary of items) drops the error records before it; a record whose `error` repeats the one
+  before is left out. A command returning a `pipeline.Partial` error (`Failures() []Failure`: item, error) did its
+  work but not for every item: `command` records them on the step (`Result.Failures`) and returns nil, so the step
+  goes on; the summary lists them under the step and `Run` fails at the end ("N failed in graph (listed above)").
+  fleet returns `fleetFailures` (each failed repository by folder name, its API as "<repo> (its API)") after
+  writing and linking everything, and logs each at its end; standalone, it exits non-zero now (it exited 0).
 - **Interaction kind:** `Endpoint.Kind` (from `Rule.Kind` or `kind=` in directives) or `model.DefaultKind(transport,
   role)`: producers and consumers are async, client/server/query/connect/dial/listener are sync, and custom roles fall
   back on the transport. Links and journey outbound entries use `Endpoint.InteractionKind()`. `Kind` enters
@@ -631,6 +729,32 @@ route; settings with only gRPC and OTel library variables; ports `:*`.
     with `config -get`, which resolved the configuration file's default pipeline, so `make clean` would have removed
     that pipeline's run; they pass `-pipeline none` now (a step's settings, like the run targets).
 
+12. **Done (asked 2026-11-06): rules for the transports an organisation's own libraries hide.** Asked after
+    most journeys of a large organisation ended in their own service. Built-in: beanstalkd (kr/beanstalk,
+    mikegleasonjr/workers); the `storage` transport for files; library adapters as handlers (see Conventions:
+    "Transport families", "beanstalkd and storage", "Library adapters"). The in-house rules (a queue client over
+    beanstalkd, an HTTP client, a gorm wrapper, a file storage client) are the profile's. Sample: `testdata/queue`.
+13. **Done (2026-11-06): reads and writes.** Every SQL endpoint gets an access: read, write or both, from the
+    call (gorm `Create`/`Save`/`Update(s)`/`UpdateColumn(s)`/`Delete` write, `Find`/`First`/`Take`/`Last`/`Scan`/
+    `Count`/`Pluck` read; `database/sql` `Query*` read, `Exec*` and `Prepare*` by the statement), the verb of raw SQL
+    (`INSERT … SELECT` both), and gorm chains followed from `Model`/`Table` to the call ending them. gorm's
+    `Update(s)`/`UpdateColumn(s)`/`Count`/`Pluck` become sites too. The access enters `EndpointID`, so every SQL
+    endpoint's ID changes once. `who <table>` lists writers and readers apart.
+14. **Done (2026-11-06): databases from the deployment.** The deploy step records each matched service's
+    databases from its containers' variables (a profile names them: host and database name pairs, prefixed or
+    suffixed), limited to the settings the service reads. A service with one database has its tables qualified
+    `database.table`; with several or none, unqualified, as before. Shared tables link only within a database
+    (confidence `same-database`), also between services of one module, directed from writer to reader (async); one
+    name in two databases no longer links. Buckets the same way for `storage` (parked: see Conventions). The graph
+    step links again after deploy. Departed from the plan: not limited to the settings a service reads (see
+    Conventions, "Databases from the deployment").
+15. **Done (2026-11-06): continuations through data and schedules.** A CronJob's schedule goes on the journey
+    it runs: its main's, or the CLI command its arguments name. A journey that writes `database.table` continues into
+    the scheduled and background journeys (CronJobs, background loops of main journeys, same service included, as
+    continuations only) that read it, async; request-driven readers are not continued into. The cap, from the
+    measured fan-out: one table hand-off per chain (Conventions, "Hand-offs through tables and schedules").
+    Sample: `testdata/payouts` (`TestDataFlows`).
+
 For each item: a sample in `testdata` and the golden test, the check on authz (or a real library for item 5),
 README and this file updated, `make test`, `make samples` and `make audit` (with a profile's denylist) passing.
 
@@ -648,7 +772,7 @@ README and this file updated, `make test`, `make samples` and `make audit` (with
     - `http client GET http://inventory:8081/items/*` from `internal/clients/inventory`.
     - `kafka producer orders.created`, message `orders.OrderCreated`, from `internal/domain/orders` via the custom rule.
     - `sql connect postgres`.
-    - `sql query orders`, 2 call sites.
+    - `sql query orders`, `read` (the `SELECT`) and `write` (the `INSERT`): two endpoints, the access in their IDs.
 - Runtime implementations:
     - `orders.Repository` → `*storage.OrderRepo`.
     - `orders.Inventory` → `*inventory.Client`, and **not** `orders.Mock`.
@@ -699,9 +823,11 @@ README and this file updated, `make test`, `make samples` and `make audit` (with
   `invoice.paid` journey.
 - `redis query billing:invoice:*` (kvcache `Set(ctx, fmt.Sprintf(InvoiceKey, id), …)`) in the `invoice.requested`
   journey.
-- gorm: `sql connect mysql` (the dialector's `Name()`), `sql query invoices` with 3 sites (`Create(inv)` and two
-  `Model(&invoice{})`, via `TableName()`), and `sql query receipts` (`Table("receipts")`). The `Find(&rs)` after it
-  adds nothing. `invoice.requested` uses `invoices`; `invoice.paid` uses `invoices` and `receipts`.
+- gorm: `sql connect mysql` (the dialector's `Name()`), `sql query invoices` `write` with 3 sites (`Create(inv)` and
+  two `Model(&invoice{})…Updates(…)` chains, via `TableName()`), `sql query receipts` `read` (`Table("receipts AS r")`
+  in `receiptsOf`, which returns the query; its caller ends it with `Find`) and `sql query refunds` `read` (a
+  `Table("refunds")` query passed to `Where` as a subquery). The `Find(&rs)` adds nothing. `invoice.requested` uses
+  `invoices`; `invoice.paid` uses `invoices`, `receipts` and `refunds`.
 - Analysed with `-include-modules 'example.com/inhouse/*-sdk-go'`: `grpc client LedgerService/Balance` (contract
   `ledger.LedgerService`, message `*pb.BalanceRequest`), `grpc client LedgerService` and `grpc dial ledger:9091`, all
   in component `example.com/inhouse/ledger-sdk-go`, through the `testdata/stubs/ledger-sdk` stub.
@@ -733,7 +859,7 @@ billing chain) and `LedgerService/Balance`.
 **tool** (`github.com/zalgonoise/codegraph/testdata/tool`, cmd/tool, x/cli v2 and envconfig stubs):
 - `cli command serve` (`main.serve`) and `cli command migrate` (`main.migrate`), each at its map entry's line;
   `http listener :8095` and `http server GET /status` (`main.serve$1`), registered inside `serve`; `sql connect
-  postgres` (2 sites) and `sql query schema_migrations`, its table from the `default` tag of an `envconfig` field
+  postgres` (2 sites) and `sql query schema_migrations` (`write`), its table from the `default` tag of an `envconfig` field
   nothing sets in code.
 - Journeys: `cli migrate` uses `sql connect postgres` and `sql query schema_migrations`; `cli serve` uses `sql connect
   postgres`; `http GET /status` uses nothing.
@@ -744,7 +870,7 @@ billing chain) and `LedgerService/Balance`.
 
 **tool-admin** (the same module, cmd/admin, cobra stub): `cli command users` (`main.newUsersCmd$1`, a constructor's
 closure) and `cli command purge` (`main.runPurge`, a package-level `cobra.Command`); the root `admin` has no `RunE`,
-so no endpoint. `sql connect postgres` (2 sites), `sql query users` and `sql query sessions`. Both send mail with the
+so no endpoint. `sql connect postgres` (2 sites), `sql query users` (`read`) and `sql query sessions` (`write`). Both send mail with the
 mailer library: `users` calls `mailer.New` and `(*mailer.Client).Send`, `purge` `mailer.NewQueued` and the interface
 method `mailer.Sender.Send` (each journey's `uses`, at `cmd/admin/main.go:38` and `:54`).
 
@@ -753,7 +879,7 @@ endpoints `mailer.New`, `mailer.NewQueued`, `mailer.Client.Send` (handler `(*mai
 `mailer.Sender.Send` (handler `mailer.Sender.Send → (*mailer.Client).Send, (*mailer.queued).Send`: the exported
 `Client` and the unexported `queued` that `NewQueued` converts to a `Sender`), and `go internal`
 `mailer/internal/tmpl.Render` (its internal API: its own journey, in the report's "Internal API" table, out of the
-service diagram unless asked for); not `(*queued).Flush` nor `Version` (declared in a generated file). `http client POST http://relay:8025/send` and `sql query outbox` (not `outbox_sent`: `Flush` is never
+service diagram unless asked for); not `(*queued).Flush` nor `Version` (declared in a generated file). `http client POST http://relay:8025/send` and `sql query outbox` (`write`; not `outbox_sent`: `Flush` is never
 reached). Journeys: `mailer.Client.Send` (components mailer, internal/tmpl; the HTTP call), `mailer.New` and
 `mailer.NewQueued` (nothing), `mailer.Sender.Send` (both roots; the HTTP call and `outbox`), and
 `mailer/internal/tmpl.Render` (nothing outbound). `model.APICalls` pairs
@@ -762,12 +888,32 @@ lists mailer as a library with no link and no unmatched endpoint; `uses Sender.S
 mailer.Sender.Send`, whose answer lists tool-admin's `purge`.
 
 **pipeline** (`github.com/zalgonoise/codegraph/testdata/pipeline`): `main` opens `sql connect postgres`, registers
-`GET /health` (`main.health(…)`, a factory's closure: journey rooted at `main.health$1`, using `sql query checkpoints`)
+`GET /health` (`main.health(…)`, a factory's closure: journey rooted at `main.health$1`, using `sql query checkpoints`, `read`)
 and `GET /metrics` (`http.NotFoundHandler(…)`, a library's handler: no journey), serves `http listener :9100` from a
-goroutine, starts `go store(…)` (`sql query readings`) and runs `pull` (`http client GET
+goroutine, starts `go store(…)` (`sql query readings`, `write`) and runs `pull` (`http client GET
 http://feed:8080/readings`, unmatched). Its main journey: functions `main.main`, `main.health`, `main.main$1`,
 `main.pull`, `main.store` (not `main.health$1`), goroutines `main.main$1` and `main.store`, outbound in program order
 `sql postgres`, `sql readings` (background), `http GET http://feed:8080/readings`.
+
+**queue-scanner** and **queue-worker** (`github.com/zalgonoise/codegraph/testdata/queue`, `-entry ./cmd/...`, rules
+`testdata/rules/inhouse.json`; kr/beanstalk, mikegleasonjr/workers and tubequeue stubs): the scanner's `POST /scans`
+(`main.queueScan(…)`, rooted at `main.queueScan$1`) puts on `beanstalkd producer scans` and `scans-priority` (each
+`Tube`'s `Name` literal, through the closure's free variables), and it consumes `scan-results` through
+`tubequeue.AdaptHandler((*main.results).Work)` (rooted at `(*main.results).Work`, nothing outbound). The worker
+consumes `scans` (`main.main$1`, a `workers.HandlerFunc`) and `scans-priority` (`main.reservePriority`, the
+`NewTubeSet` caller), both putting on `scan-results`. Both dial `beanstalkd dial beanstalkd:11300`.
+
+**payouts-api** and **payouts-send** (`github.com/zalgonoise/codegraph/testdata/payouts`, `-entry ./cmd/...`, with
+`deploy.yaml`: a Deployment and a CronJob `15 15 * * 1-5`, both `DB_HOST`/`DB_NAME` from one ConfigMap,
+`payouts-main/payouts`). The API's `POST /payouts` writes `payouts` (INSERT), `GET /payouts/{id}` reads it; the send
+job's main reads it (SELECT), calls `http client POST http://bank:8443/transfers` and writes it (UPDATE). Linked with
+the deployment (`TestDataFlows`): `payouts-api → payouts-send` and `payouts-send → payouts-api`, `sql
+payouts.payouts`, async, `same-database`; without it, no link. `who payouts` lists them "Written by" and "Read by",
+"in database `payouts-main/payouts`"; `context.md` has "Databases (deployment): `payouts-main/payouts`."
+`System.Schedules` has `payouts-send|main` `15 15 * * 1-5`. The system journey `POST /payouts` hops async through
+`payouts.payouts` (write) into payouts-send's `main` (with its schedule), which shows `sql connect mysql`, `payouts`
+read, `POST http://bank:8443/transfers` and `payouts` write as external: its own write leads back to itself only.
+`GET /payouts/{id}` reads, and is no system journey; nor is the job's (its calls stay outside).
 
 **Main journeys of the other samples:** orders' reaches the wiring of every component and `sql connect postgres`;
 ledger's its two dials and its two service-level clients (`NotifierService`, linked to notifier, and the gateway's
@@ -786,7 +932,8 @@ both; settings `DB_HOST`, `SMTP_HOST`.
 `NotifierService` (sync, `exact`: ledger's clients have no contract, so the service name decides), and `billing → ledger` over gRPC
 `LedgerService` (sync, `exact`, the SDK's call matched by contract), `billing → gateway` over HTTP
 `POST /backoffice/payments/{payment_id}/refund` (sync, `pattern`: the iris route's typed parameter), plus a
-`billing ↔ ledger` shared store on Redis `billing:invoice:*` (`name-only`).
+`billing ↔ ledger` shared store on Redis `billing:invoice:*` (`name-only`), and over beanstalkd (async, `exact`)
+`queue-scanner → queue-worker` on `scans` and `scans-priority`, `queue-worker → queue-scanner` on `scan-results`.
 
 - **Dangling:**
   - notifier's `POST http://smtp-relay/send` (ledger's two `NotifierService` clients now link to the declared notifier);
@@ -800,6 +947,7 @@ both; settings `DB_HOST`, `SMTP_HOST`.
     `invoice.requested` consumer, which uses `sql invoices` and `billing.invoice.issued`.
   - `billing.invoice.paid` continues into ledger's `LedgerService/Balance`.
   - `billing.refunds` continues into gateway's `POST /backoffice/payments/{payment_id}/refund`.
+  - `POST /scans` continues into the worker's `scans` and `scans-priority`, each into the scanner's `scan-results`.
 
 ## Working agreements
 

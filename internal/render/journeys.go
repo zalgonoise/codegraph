@@ -48,7 +48,7 @@ func Journey(m *model.Manifest, j model.Journey) *Graph {
 			continue
 		}
 		class, shape := "outbound", ShapeStadium
-		if ep.Transport == "sql" || ep.Role == "connect" {
+		if model.Store(ep.Transport) || ep.Role == "connect" {
 			class, shape = "store", ShapeCylinder
 		}
 		ep.Count = 1 // the merged site count is service-wide, not per journey

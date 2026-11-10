@@ -128,6 +128,13 @@ func ServiceMarkdown(d *ServiceDetail) string {
 			if len(w.Hosts) > 0 {
 				line += "; hosts " + strings.Join(w.Hosts, ", ")
 			}
+			if len(w.Databases) > 0 {
+				var dbs []string
+				for _, db := range w.Databases {
+					dbs = append(dbs, "`"+db.String()+"`")
+				}
+				line += "; database " + strings.Join(dbs, ", ")
+			}
 			if len(w.Mocks) > 0 {
 				line += "; **mocked:** " + strings.Join(w.Mocks, ", ")
 			}
@@ -195,6 +202,9 @@ func JourneyMarkdown(d *JourneyDetail, depth int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s · %s `%s`\n\nHandler `%s`%s; %d module functions; components: %s.\n",
 		d.Service, d.Transport, d.Key, d.Handler, at(d.Position), d.Funcs, strings.Join(d.Components, ", "))
+	if d.Schedule != "" {
+		fmt.Fprintf(&b, "\nRun on a schedule by the deployment: `%s`.\n", d.Schedule)
+	}
 	if d.WholeService() {
 		b.WriteString("\nA whole-service journey: it covers every method of the service, so a call listed here may " +
 			"come from any of them.\n")
@@ -254,11 +264,17 @@ func writeSteps(b *strings.Builder, steps []Step, depth int) {
 			line += " — " + s.Unmatched
 		}
 		var notes []string
+		if s.Access != "" {
+			notes = append(notes, s.Access)
+		}
 		if s.Confidence != "" && s.Confidence != "exact" {
 			notes = append(notes, s.Confidence)
 		}
 		if s.Background {
 			notes = append(notes, "in a goroutine")
+		}
+		if s.Schedule != "" {
+			notes = append(notes, "runs on schedule `"+s.Schedule+"`")
 		}
 		if s.Cycle {
 			notes = append(notes, "cycle: already on this path")
@@ -295,6 +311,9 @@ func whoMarkdown(query string, us []KeyUsers, heading string) string {
 			fmt.Fprintf(&b, "\n%s:\n", title)
 			for _, x := range list {
 				line := fmt.Sprintf("- **%s** %s", x.Service, x.Role)
+				if x.Database != "" {
+					line += fmt.Sprintf(" in database `%s`", x.Database)
+				}
 				if x.Handler != "" {
 					line += fmt.Sprintf(" `%s`", x.Handler)
 				}
@@ -328,7 +347,21 @@ func whoMarkdown(query string, us []KeyUsers, heading string) string {
 		}
 		uses("Sent by", u.Senders)
 		uses("Received by", u.Receivers)
-		uses("Used by", u.Users)
+		var writes, reads, other []Use
+		for _, x := range u.Users {
+			if model.Writes(x.Access) {
+				writes = append(writes, x)
+			}
+			if model.Reads(x.Access) {
+				reads = append(reads, x)
+			}
+			if x.Access == "" {
+				other = append(other, x)
+			}
+		}
+		uses("Written by", writes)
+		uses("Read by", reads)
+		uses("Used by", other)
 	}
 	return strings.TrimPrefix(b.String(), "\n")
 }
