@@ -219,6 +219,7 @@ type MCP struct {
 	Run       string
 	Explorer  string // the explorer page answers link to ("" for the run's own, "none" for none)
 	Inventory string // the inventory image questions read ("" for <run>/../inventory)
+	Entry     bool   // print the entry a client's configuration needs to start this server, and exit
 }
 
 // ParseMCP parses `codegraph mcp` flags.
@@ -230,8 +231,9 @@ func ParseMCP(args []string) (*MCP, error) {
 	fs.StringVar(&c.Profile, "profile", "", "a profile (a directory, or a name of the configuration file's profiles): its run is read")
 	fs.StringVar(&c.Explorer, "explorer", "", explorerUsage)
 	fs.StringVar(&c.Inventory, "inventory", "", inventoryUsage)
+	fs.BoolVar(&c.Entry, "entry", false, "print the entry an MCP client's configuration needs to start this server (Claude Desktop's \"mcpServers\"), with absolute paths, and exit")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: codegraph mcp [-run dir|bundle] [-explorer url|none]   (an MCP server on stdin and stdout, for Claude Code and Claude Desktop)")
+		fmt.Fprintln(fs.Output(), "usage: codegraph mcp [-run dir|bundle] [-explorer url|none] [-entry]   (an MCP server on stdin and stdout, for Claude Code and Claude Desktop)")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

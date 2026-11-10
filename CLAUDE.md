@@ -11,7 +11,8 @@ users.
    and the declared sample (`testdata/declared/notifier.json`); `cmd/codegraph/pipeline_test.go` runs a configuration
    file's pipeline over git clones of two samples, four times (reuse, a new commit, `-full`);
    `TestDataFlows` analyses `testdata/payouts`, deploys its `deploy.yaml` and links them;
-   `cmd/codegraph/commands_test.go` checks the commands' names and short forms; unit tests cover
+   `cmd/codegraph/commands_test.go` checks the commands' names and short forms, and the MCP entry
+   (`TestMCPEntry`); unit tests cover
    `internal/bundle`, `config`, `configfile`, `declared`, `deploy`, `diff`, `incremental`, `inventory`, `library`,
    `link`, `mcpserver`, `model`, `options`, `pipeline`, `profile`, `query`, `render`, `resolve`, `settings` and
    `transport` (`deploy.TestRender` uses helm when installed). `make samples` writes the samples' run to `tmp/samples`.
@@ -120,7 +121,7 @@ configfile + profile → options (layers) → pipeline → fleet (+ incremental)
 | `internal/bundle` | `codegraph bundle`: `Write` packs a run (manifests, deployment, inventory, a freshly drawn explorer, `bundle.json` metadata) into a tar compressed with gzip or zstd (`klauspost/compress`), applying `NoSettings` and `NoPositions`; `Read`/`ReadFrom` read one back (told by its magic bytes); `Load` reads a run directory or a bundle, which every command reading a run uses (`query.Load`, `readRun`); `ExplorerPage` writes a bundle's page to the user's cache |
 | `internal/diff` | `codegraph diff`: compares two runs (links both): links, services, endpoint signatures per service, unanswered topics; Markdown report, `-fail-on-links` for CI |
 | `Dockerfile`, `.dockerignore` | The toolchain image (Go, pkg-config + libxml2, python3, make; `CODEGRAPH=codegraph` prebuilt) for `make docker-*` |
-| `Makefile` | The run targets are `codegraph run <step>` (`graph`, `org`, `inventory`, `deploy`, `checks`, `diff`, `bundle`), with `RUN_FLAGS` built from the variables given to make (`$(origin)` command line or environment); `config`, `check`, `status`; `query`, `open`, `clean`, `audit`, `docker-graph` and `mcp-desktop` read settings with `codegraph config -pipeline none -get` (a step's settings: the default pipeline of the person's configuration file would point `clean` at another run). Then `samples`, `test`, `cover`, `release`, `mcp-build` and the `docker-*` targets |
+| `Makefile` | The run targets are `codegraph run <step>` (`graph`, `org`, `inventory`, `deploy`, `checks`, `diff`, `bundle`), with `RUN_FLAGS` built from the variables given to make (`$(origin)` command line or environment); `config`, `check`, `status`; `query`, `open`, `clean`, `audit` and `docker-graph` read settings with `codegraph config -pipeline none -get` (a step's settings: the default pipeline of the person's configuration file would point `clean` at another run); `mcp-desktop` is `mcp-build` then that binary's `mcp -entry` (with `-profile` for `PROFILE`, `-run` for a given `OUT`). Then `samples`, `test`, `cover`, `release`, `mcp-build` and the `docker-*` targets |
 | `internal/profile` | An organisation's profile: `Load` reads `<dir>/profile.yaml` (`-profile`, or `$CODEGRAPH_PROFILE`; `profile.json`, its conventions only, when there is none) into `inventory.Conventions`, the contracts catalogues and `Defaults` (an `options.Options`, paths relative to the profile) |
 | `internal/options` | The settings of runs (`Options`, every field a pointer: unset is nil), merged in layers with their sources (`Merge`), paths resolved against the file setting them (`Resolve`), `{root}` and `{out}` expanded once merged (`Expand`), flags in kebab case (`Register`); `DecodeYAML`: YAML through the json names, unknown keys as warnings with a suggestion (`CheckKeys`, `Suggest`) |
 | `internal/configfile` | `.codegraph.yaml`: `Find` (-config, `$CODEGRAPH_CONFIG`, the current directory, the home directory), `Read` (profiles, `profile`, `default`, `query`, `pipelines` of `Step`s), trust (`Trusted`: not from the current directory), `Template` for `codegraph init` |
@@ -362,6 +363,17 @@ journey that reaches another service (a summary and the first steps above `maxSe
   dashes, as `-config`, `-run`, `-inventory` and `-bundle` are flags, except the customary `-h`/`-help`/`--help` and
   `-v`/`-version`/`--version`; an unknown command says so (a dashed name: no dashes, flags after the command), or
   suggests a near name. `TestCommandNames` keeps the forms unique and listed in the usage.
+- **MCP entry** (`mcpEntry` in `cmd/codegraph/main.go`, 2026-11-10): `codegraph mcp -entry` prints the entry a
+  client's configuration needs (`"command"`: `os.Executable`, `"args"`), and `make mcp-desktop` asks the binary it
+  built. A client such as Claude Desktop starts the server from `/` with no shell environment, so the run is resolved
+  as the server would here (`-run`, else `pipeline.QueryRun`) and written as an absolute `-run`; only a run that the
+  home directory's configuration file names (`query.run`, with no `-run`, `-profile`, `-config` or
+  `$CODEGRAPH_PROFILE` in play) gives `["mcp"]` alone, which the server resolves again by itself. The entry goes to
+  standard output; where it answers from, a warning when no run is there (`hasRun`: manifests or a bundle; naming the
+  run `["mcp"]` alone would read when the home file names another that exists) and a warning for go run's temporary
+  binary go to standard error. Before it, the target printed `config -pipeline none -get out`: the profile's own
+  run even when it did not exist and the configuration file named another, and a relative `tmp/graph` without a
+  profile.
 - **Configuration file and pipelines** (`internal/configfile`, `internal/pipeline`, 2026-11-05): `codegraph run`
   runs a pipeline of `.codegraph.yaml` or a built-in step; the Makefile's run targets are those steps, so make and
   pipelines never diverge. Layers: built-in (`options.Defaults`), the profile's `defaults`, the pipeline's, the step's,
@@ -741,13 +753,14 @@ route; settings with only gRPC and OTel library variables; ports `:*`.
     `Update(s)`/`UpdateColumn(s)`/`Count`/`Pluck` become sites too. The access enters `EndpointID`, so every SQL
     endpoint's ID changes once. `who <table>` lists writers and readers apart.
 14. **Done (2026-11-06): databases from the deployment.** The deploy step records each matched service's
-    databases from its containers' variables (a profile names them: host and database name pairs, prefixed or
-    suffixed), limited to the settings the service reads. A service with one database has its tables qualified
+    databases from its containers' variables (built-in name patterns, no profile setting: host and database name
+    pairs, prefixed or suffixed). A service with one database has its tables qualified
     `database.table`; with several or none, unqualified, as before. Shared tables link only within a database
     (confidence `same-database`), also between services of one module, directed from writer to reader (async); one
     name in two databases no longer links. Buckets the same way for `storage` (parked: see Conventions). The graph
-    step links again after deploy. Departed from the plan: not limited to the settings a service reads (see
-    Conventions, "Databases from the deployment").
+    step links again after deploy. Departed from the plan, which had a profile name the variables and kept only
+    the settings a service reads: the patterns are built in, and nothing is filtered (see Conventions, "Databases
+    from the deployment").
 15. **Done (2026-11-06): continuations through data and schedules.** A CronJob's schedule goes on the journey
     it runs: its main's, or the CLI command its arguments name. A journey that writes `database.table` continues into
     the scheduled and background journeys (CronJobs, background loops of main journeys, same service included, as

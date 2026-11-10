@@ -26,8 +26,10 @@ description: Answer questions about the architecture of Go services analysed by 
    is a module analysed through its exported API (`codegraph analyze -library`): its journeys (transport `go`, keys
    like `pkg.Type.Method`) say what each exported symbol does, and list the journeys calling it.
 5. **Answer with evidence:** the services, keys and `file:line` positions from the answers. Say when a part is `*`
-   (unresolved), a link is `name-only`, or something is outside the analysed services. Say so when the answer comes
-   from a bundle that leaves out settings or positions. To confirm a detail, read the analysed repository's code, and
+   (unresolved), a link is `name-only`, or something is outside the analysed services. A hop keyed
+   `<database>.<table>` (`same-database`) is a hand-off, not a call: one journey writes the table and a scheduled job
+   or a worker reads it later, as the deployment configures their databases; say so, and give the schedule when the
+   answer has one. Say so when the answer comes from a bundle that leaves out settings or positions. To confirm a detail, read the analysed repository's code, and
    never write there.
 6. **Illustrate when it helps:** ask `service`, `journey`, `who`, `path` or `impact` for a diagram (`diagram: true`,
    or `-diagram`) and show its Mermaid source as a diagram; pass on the explorer links answers end with.

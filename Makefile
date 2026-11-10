@@ -118,9 +118,8 @@ query: ## Ask the last run: make query Q='who <topic>' (go run ./cmd/codegraph q
 mcp-build: ## Build codegraph for MCP clients that need a binary (tmp/bin/codegraph); rebuild after code changes
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/codegraph
 
-mcp-desktop: mcp-build ## Print the Claude Desktop entry for the codegraph MCP server (absolute paths)
-	@echo 'Add to "mcpServers" in ~/Library/Application Support/Claude/claude_desktop_config.json, then restart Claude Desktop:'
-	@printf '%s\n' '"codegraph": {' '  "command": "$(abspath $(BIN))",' '  "args": ["mcp", "-run", "$(call get,out)"]' '}'
+mcp-desktop: mcp-build ## Print the Claude Desktop entry for the codegraph MCP server (codegraph mcp -entry): OUT's run or PROFILE's, else the one codegraph mcp reads
+	@$(abspath $(BIN)) mcp -entry $(if $(PROFILE),-profile '$(PROFILE)') $(call str,OUT,-run)
 
 open: ## Open the system explorer of the last run
 	@page='$(call get,out)/_system/system.html'; test -f "$$page" || { echo "no $$page yet: make graph"; exit 1; }; \

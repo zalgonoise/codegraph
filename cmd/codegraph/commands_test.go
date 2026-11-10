@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,5 +48,76 @@ func TestCommandNames(t *testing.T) {
 		if err := dispatch([]string{arg}); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("dispatch(%q): %v", arg, err)
 		}
+	}
+}
+
+// codegraph mcp -entry prints what an MCP client needs to start this binary,
+// from anywhere: absolute paths, and no -run only when the home directory's
+// configuration file names the run, which the server then finds by itself.
+func TestMCPEntry(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(cwd)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(file, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(args ...string) string {
+		t.Helper()
+		return captureStdout(t, func() error { return dispatch(append([]string{"mcp", "-entry"}, args...)) })
+	}
+	args := func(run string, more ...string) string {
+		quoted := []string{`"mcp"`}
+		for _, a := range append([]string{"-run", run}, more...) {
+			quoted = append(quoted, `"`+a+`"`)
+		}
+		return `"args": [` + strings.Join(quoted, ", ") + `]`
+	}
+
+	// No configuration file (TestMain): the default run, made absolute.
+	if out := entry(); !strings.Contains(out, `"command": "`+exe+`"`) || !strings.Contains(out, args(filepath.Join(wd, "tmp/graph"))) {
+		t.Errorf("the default run:\n%s", out)
+	}
+	if out := entry("-run", "runs/x", "-explorer", "none"); !strings.Contains(out, args(filepath.Join(wd, "runs/x"), "-explorer", "none")) {
+		t.Errorf("-run and -explorer:\n%s", out)
+	}
+
+	// The home directory's file names the run: the server needs no argument.
+	t.Setenv("CODEGRAPH_CONFIG", "")
+	write(filepath.Join(home, ".codegraph.yaml"), "query:\n  run: runs/daily\n")
+	if out := entry(); !strings.Contains(out, `"args": ["mcp"]`+"\n") {
+		t.Errorf("a run the home file names:\n%s", out)
+	}
+	// A profile's run, a client's environment and another file are not what a
+	// client starting the server would find: the run is named.
+	write(filepath.Join(wd, "acme", "profile.yaml"), "defaults:\n  out: runs/acme\n")
+	acme := args(filepath.Join(wd, "acme", "runs/acme"))
+	if out := entry("-profile", "acme"); !strings.Contains(out, acme) {
+		t.Errorf("-profile:\n%s", out)
+	}
+	t.Setenv("CODEGRAPH_PROFILE", filepath.Join(wd, "acme"))
+	if out := entry(); !strings.Contains(out, acme) {
+		t.Errorf("$CODEGRAPH_PROFILE:\n%s", out)
+	}
+	t.Setenv("CODEGRAPH_PROFILE", "")
+	if out := entry("-config", filepath.Join(home, ".codegraph.yaml")); !strings.Contains(out, args(filepath.Join(home, "runs/daily"))) {
+		t.Errorf("-config:\n%s", out)
+	}
+	write(filepath.Join(wd, ".codegraph.yaml"), "query:\n  run: runs/here\n")
+	if out := entry(); !strings.Contains(out, args(filepath.Join(wd, "runs/here"))) {
+		t.Errorf("the current directory's file:\n%s", out)
 	}
 }

@@ -230,10 +230,10 @@ make open       # open the explorer of the last run (tmp/graph/_system/system.ht
 make diff       # what changed since the previous run (make graph also does it; report in tmp/graph/diff.md)
 make checks     # the profile's checks on the last run (make graph also runs them)
 make config     # codegraph config;  make check: codegraph check;  make status: codegraph status
-make query Q='services'   # ask the last run (also: service, journey, who, path, impact, search)
+make query Q='services'   # ask the last run (also: service, journey, who, path, impact, uses, image, search)
 make samples    # analyse the bundled samples
 make test       # gofmt, go vet and the tests;  make cover: their coverage (minimum COVER_MIN, 70%)
-make mcp-build  # build tmp/bin/codegraph for MCP clients;  make mcp-desktop: Claude Desktop's entry too
+make mcp-build  # build tmp/bin/codegraph for MCP clients;  make mcp-desktop: Claude Desktop's entry too (codegraph mcp -entry)
 make audit      # with a profile's DENYLIST: check that no file here names the organisation
 make docker-test  # the tests in the toolchain image;  make docker-graph: make graph in it
 make bundle     # pack the last run into one file to share (tmp/graph.tar.gz; BUNDLE_FLAGS=-no-settings -no-positions)
@@ -977,8 +977,9 @@ without a shell. It is a local process; nothing listens on the network.
 To connect it:
 - **Claude Code:** `.mcp.json` in this repository starts it (`go run ./cmd/codegraph mcp -run tmp/graph`) in sessions opened
   here; Claude Code asks to approve it the first time.
-- **Claude Desktop:** `make mcp-desktop` builds `tmp/bin/codegraph` and prints the entry to add under `"mcpServers"` in
-  `~/Library/Application Support/Claude/claude_desktop_config.json`, then restart Claude Desktop:
+- **Claude Desktop:** `codegraph mcp -entry` prints the entry to add under `"mcpServers"` in
+  `~/Library/Application Support/Claude/claude_desktop_config.json` (then restart Claude Desktop), for the binary
+  asked; `make mcp-desktop` builds `tmp/bin/codegraph` and asks it:
 
   ```json
   "codegraph": {
@@ -987,7 +988,12 @@ To connect it:
   }
   ```
 
-  - With a `~/.codegraph.yaml` naming the run (`query.run`), `"args": ["mcp"]` is enough, and the run follows the file.
+  - The run is the one `codegraph mcp` would read there (`-run`, `-profile`; with make, `OUT=` or `PROFILE=`), as an
+    absolute path. It then says where the entry answers from, and warns when no run is there yet.
+  - With a `~/.codegraph.yaml` naming the run (`query.run`), the entry is `"args": ["mcp"]` alone: the server finds
+    that file by itself, and the run follows the file. A run named any other way (a profile, `$CODEGRAPH_PROFILE`,
+    another configuration file) is written as `-run`, since Claude Desktop starts servers without the shell's
+    environment.
   - Both paths must be absolute, and `args` is required: Claude Desktop starts servers outside the repository, and
     without `mcp` codegraph prints its usage and exits ("Server disconnected"). Its log (`~/Library/Logs/Claude/
     mcp-server-codegraph.log`) then shows a line saying which arguments are missing, or that `-run` holds no run.

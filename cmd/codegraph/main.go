@@ -151,7 +151,7 @@ func noCommand() []string {
 		os.Exit(2)
 	}
 	fmt.Fprint(os.Stderr, usage)
-	fmt.Fprintln(os.Stderr, `codegraph: no command given. An MCP client must pass one: "args": ["mcp", "-run", "<absolute path of the run, such as …/codegraph/tmp/graph>"] (make mcp-desktop prints the entry).`)
+	fmt.Fprintln(os.Stderr, `codegraph: no command given. An MCP client must pass one: "args": ["mcp", "-run", "<absolute path of the run, such as …/codegraph/tmp/graph>"], or "args": ["mcp"] when ~/.codegraph.yaml names the run (codegraph mcp -entry prints the entry).`)
 	os.Exit(2)
 	return nil
 }
@@ -1483,6 +1483,9 @@ func runMCP(args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Entry {
+		return mcpEntry(cfg)
+	}
 	if cfg.Run, cfg.Explorer, err = queryRun(cfg.Config, cfg.Profile, cfg.Run, cfg.Explorer); err != nil {
 		return err
 	}
@@ -1491,11 +1494,93 @@ func runMCP(args []string) error {
 		return err
 	}
 	logf("mcp: answering from %s", dir)
-	if ms, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(ms) == 0 && !bundle.IsBundle(dir) {
+	if !hasRun(dir) {
 		// Clients such as Claude Desktop start servers outside the repository, so a relative -run misses.
 		logf("mcp: no run in %s yet: answers will fail until make graph writes one there, or -run names the run's absolute path", dir)
 	}
 	return mcpserver.New(dir, buildVersion(), cfg.Explorer, cfg.Inventory).Run(context.Background(), &mcp.StdioTransport{})
+}
+
+// hasRun tells whether dir holds a run: services' manifests, or a bundle.
+func hasRun(dir string) bool {
+	ms, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json"))
+	return len(ms) > 0 || bundle.IsBundle(dir)
+}
+
+// mcpEntry prints the entry that starts this binary as an MCP server, for a
+// client's configuration (codegraph mcp -entry; make mcp-desktop). Clients
+// such as Claude Desktop start servers outside any repository and without the
+// shell's environment, so the binary and the run are absolute paths, and a run
+// that -run, a profile, the environment or the default names is passed as
+// -run. Only a run the home directory's configuration file names (query.run)
+// needs no argument: the server finds that file again, and follows it. The
+// entry goes to standard output; what it answers from, and a warning when no
+// run is there, to standard error.
+func mcpEntry(cfg *config.MCP) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cf, err := configfile.Find(cfg.Config)
+	if err != nil {
+		return err
+	}
+	run, from := cfg.Run, "-run"
+	if run == "" {
+		if run, from, err = pipeline.QueryRun(cf, cfg.Profile); err != nil {
+			return err
+		}
+	}
+	if run, err = filepath.Abs(run); err != nil {
+		return err
+	}
+	named := cf != nil && cf.Source == configfile.FromHome && cf.Query.Run != "" // what "args": ["mcp"] alone reads
+	follows := named && cfg.Run == "" && cfg.Profile == "" && cfg.Config == "" && os.Getenv(profile.Env) == ""
+	args := []string{"mcp"}
+	if !follows {
+		args = append(args, "-run", run)
+	}
+	if cfg.Explorer != "" {
+		args = append(args, "-explorer", cfg.Explorer)
+	}
+	if cfg.Inventory != "" {
+		inv, err := filepath.Abs(cfg.Inventory)
+		if err != nil {
+			return err
+		}
+		args = append(args, "-inventory", inv)
+	}
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = jsonString(a)
+	}
+
+	logf(`mcp: add this under "mcpServers" in the client's configuration (Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json), then restart the client:`)
+	fmt.Printf("\"codegraph\": {\n  \"command\": %s,\n  \"args\": [%s]\n}\n", jsonString(exe), strings.Join(quoted, ", "))
+	if follows {
+		logf("mcp: it answers from %s (%s), and follows that file", run, from)
+	} else {
+		logf("mcp: it answers from %s (%s)", run, from)
+	}
+	if strings.Contains(exe, string(filepath.Separator)+"go-build") {
+		logf("mcp: warning: %s is go run's temporary build: build one to keep (make mcp-build, or go install) and ask it for its entry", exe)
+	}
+	if !hasRun(run) {
+		msg := fmt.Sprintf("mcp: warning: no run in %s yet: answers fail until one is made there (codegraph run graph)", run)
+		if named && !follows && cf.Query.Run != run && hasRun(cf.Query.Run) {
+			msg += fmt.Sprintf(`; "args": ["mcp"] alone reads %s, the run %s names`, cf.Query.Run, cf.Path)
+		}
+		logf("%s", msg)
+	}
+	return nil
+}
+
+func jsonString(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return strings.TrimSpace(b.String())
 }
 
 // queryRun resolves the run (and the explorer) query and mcp read when -run
